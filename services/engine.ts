@@ -1,153 +1,231 @@
-import { AccountSettings, BrokerType, CalculationResult, InstrumentType, Side, Trade } from '../types';
+import {
+  AccountSettings,
+  BrokerType,
+  CalculationResult,
+  InstrumentType,
+  Side,
+  Trade,
+} from "../types";
 
+/**
+ * CONSERVATIVE ENGINE (Call-Avoidance Mode)
+ *
+ * Goal: NEVER get a day-trade margin call.
+ *
+ * Key conservative assumptions:
+ * - Start-of-day DTBP is a hard cap.
+ * - DTBP is consumed by opening stock/ETF exposure (buys). It is NOT re-credited intraday by sells.
+ * - Long options are cash-only; option BUYs consume spendable cash.
+ * - Proceeds from SELLs are treated as pending/unsettled (NOT spendable intraday for new trades).
+ * - This intentionally underestimates "available" buying power to keep you safe.
+ */
 export const calculateBuyingPower = (
   settings: AccountSettings,
   trades: Trade[]
 ): CalculationResult => {
   const auditLog: string[] = [];
   const warnings: string[] = [];
-  
-  // 1. Initialize Start of Day Values
-  let cash = settings.startOfDayCash;
-  let equity = settings.startOfDayEquity; // Simplified assumption: Start Equity = Start Cash for this demo if no positions
-  
-  // Start of Day DTBP Calculation (FINRA Rule 4210 approx)
-  // DTBP = 4 * (Equity - Maintenance Margin Requirement)
-  // If settings.startOfDayDTBP is provided (e.g. from broker), use it, otherwise calculate.
-  const maintenanceExcess = Math.max(0, settings.startOfDayEquity - settings.startOfDayMaintReq);
-  
-  let dtbpStart = settings.startOfDayDTBP && settings.startOfDayDTBP > 0
-    ? settings.startOfDayDTBP
-    : (settings.isPDT ? maintenanceExcess * 4 : maintenanceExcess * 2); // 2x for non-PDT usually, simplified
 
-  auditLog.push(`Initialization: Broker=${settings.broker}, Equity=$${equity.toLocaleString()}, Cash=$${cash.toLocaleString()}`);
-  auditLog.push(`Start-of-Day DTBP set to $${dtbpStart.toLocaleString()} based on ${settings.startOfDayDTBP ? 'User Override' : '4x Maintenance Excess (PDT)'}`);
+  // -----------------------------
+  // 1) Start-of-day state
+  // -----------------------------
+  let spendableCash = settings.startOfDayCash; // cash allowed to deploy today
+  let pendingCash = 0; // proceeds from sells; NOT reusable intraday (conservative)
+  const equity = settings.startOfDayEquity;
 
-  let currentDTBP = dtbpStart;
-  let intradayBP = dtbpStart; // Fidelity concept: tracks intraday usage
-  
-  const openPositions: Record<string, { quantity: number; avgCost: number }> = {};
-  
-  // Sort trades by time just in case
+  // FINRA-ish DTBP approximation with user override
+  // maintenanceExcess = max(0, Equity - Maintenance Requirement)
+  const maintenanceExcess = Math.max(
+    0,
+    settings.startOfDayEquity - settings.startOfDayMaintReq
+  );
+
+  const dtbpStart =
+    settings.startOfDayDTBP && settings.startOfDayDTBP > 0
+      ? settings.startOfDayDTBP
+      : settings.isPDT
+        ? maintenanceExcess * 4
+        : maintenanceExcess * 2;
+
+  auditLog.push(
+    `Initialization: Broker=${settings.broker}, Equity=$${equity.toLocaleString()}, SpendableCash=$${spendableCash.toLocaleString()}`
+  );
+  auditLog.push(
+    `Start-of-Day DTBP set to $${dtbpStart.toLocaleString()} based on ${
+      settings.startOfDayDTBP ? "User Override" : settings.isPDT ? "4x Maintenance Excess (PDT approx)" : "2x Maintenance Excess (Non-PDT approx)"
+    }`
+  );
+
+  // DTBP consumption model: only increases; no intraday re-credit
+  let dtbpUsed = 0;
+  let intradayBP = dtbpStart; // derived as dtbpStart - dtbpUsed each trade
+
+  // Simple position tracking (for display only)
+  const openPositions: Record<string, { quantity: number; avgCost: number }> =
+    {};
+
+  // Sort trades by timestamp
   const sortedTrades = [...trades].sort((a, b) => a.timestamp - b.timestamp);
 
+  // -----------------------------
+  // 2) Trade loop
+  // -----------------------------
   for (const trade of sortedTrades) {
     const isOption = trade.instrument === InstrumentType.OPTION;
-    const multiplier = isOption ? 100 : 1;
-    
-    const tradeCost = trade.quantity * trade.price * multiplier;
-    const totalCost = tradeCost + trade.fees;
-    
-    const isBuy = trade.side === Side.BUY || trade.side === Side.BUY_TO_COVER;
-    const isSell = trade.side === Side.SELL || trade.side === Side.SELL_SHORT;
     const isLeveragedETF = trade.instrument === InstrumentType.ETF_LEVERAGED;
+
+    const multiplier = isOption ? 100 : 1;
     const leverageFactor = trade.leverageFactor || 1;
 
-    auditLog.push(`--- Processing Trade: ${trade.side} ${trade.quantity} ${trade.instrument === InstrumentType.OPTION ? 'Contracts' : 'Shares'} ${trade.symbol} @ ${trade.price} (Mult: ${multiplier}) ---`);
+    const tradeNotional = trade.quantity * trade.price * multiplier; // excludes fees
+    const totalCost = tradeNotional + trade.fees; // cash outlay on buys; gross proceeds on sells handled below
 
-    // --- Cash & Equity Updates ---
+    const isBuy =
+      trade.side === Side.BUY || trade.side === Side.BUY_TO_COVER;
+    const isSell =
+      trade.side === Side.SELL || trade.side === Side.SELL_SHORT;
+
+    auditLog.push(
+      `--- Trade ${trade.id}: ${trade.side} ${trade.quantity} ${
+        isOption ? "Contracts" : "Shares"
+      } ${trade.symbol} @ ${trade.price} (mult=${multiplier}) fees=$${trade.fees} ---`
+    );
+
+    // -----------------------------
+    // 2A) Pre-trade safety checks
+    // -----------------------------
     if (isBuy) {
-      cash -= totalCost;
-      // Position tracking
-      if (!openPositions[trade.symbol]) openPositions[trade.symbol] = { quantity: 0, avgCost: 0 };
+      if (isOption) {
+        // Options are cash-only (conservative), and pending proceeds do not count
+        const projectedSpendable = spendableCash - totalCost;
+        if (projectedSpendable < 0) {
+          warnings.push(
+            `Insufficient SPENDABLE CASH for option buy on trade ${trade.id}. (Conservative: option sell proceeds not reusable intraday.)`
+          );
+        }
+      } else {
+        // Stocks/ETFs consume DTBP on buys
+        let consumption = totalCost;
+
+        // Schwab leveraged ETF penalty (conservative approximation)
+        if (
+          settings.broker === BrokerType.SCHWAB_TOS &&
+          isLeveragedETF &&
+          leverageFactor > 1
+        ) {
+          consumption = totalCost * leverageFactor;
+        }
+
+        const projectedUsed = dtbpUsed + consumption;
+        const projectedRemaining = dtbpStart - projectedUsed;
+
+        if (projectedRemaining < 0) {
+          warnings.push(
+            `DTBP would be exceeded by trade ${trade.id} (Conservative mode).`
+          );
+        }
+      }
+    }
+
+    // -----------------------------
+    // 2B) Cash ledger updates
+    // -----------------------------
+    if (isBuy) {
+      // All buys consume spendable cash in this conservative model
+      spendableCash -= totalCost;
+
+      // Position tracking (display)
+      if (!openPositions[trade.symbol]) {
+        openPositions[trade.symbol] = { quantity: 0, avgCost: 0 };
+      }
       const currentPos = openPositions[trade.symbol];
-      // Weighted average cost update
       const newQty = currentPos.quantity + trade.quantity;
-      const newCost = ((currentPos.quantity * currentPos.avgCost) + tradeCost) / newQty;
-      openPositions[trade.symbol] = { quantity: newQty, avgCost: newCost };
+
+      // Weighted average cost using notional (excluding fees) for simplicity
+      const newAvgCost =
+        newQty > 0
+          ? (currentPos.quantity * currentPos.avgCost + tradeNotional) / newQty
+          : 0;
+
+      openPositions[trade.symbol] = { quantity: newQty, avgCost: newAvgCost };
     } else if (isSell) {
-      cash += (tradeCost - trade.fees);
-      // Realized P/L calculation would go here for equity updates
-      // For simplicity in this demo, we approximate Equity = Cash + Position Value
+      // Sells are NOT credited to spendable cash intraday; treated as pending/unsettled
+      const netProceeds = tradeNotional - trade.fees;
+      pendingCash += netProceeds;
+
+      // Position tracking (display)
       if (openPositions[trade.symbol]) {
         openPositions[trade.symbol].quantity -= trade.quantity;
-        if (openPositions[trade.symbol].quantity <= 0) delete openPositions[trade.symbol];
-      }
-    }
-
-    // --- Buying Power Logic based on Broker ---
-    
-    if (settings.broker === BrokerType.FIDELITY) {
-      // FIDELITY RULES:
-      // 1. DTBP (Start) is fixed. It does NOT increase when you sell overnight positions.
-      // 2. Intraday BP starts at DTBP.
-      // 3. Buying stocks reduces Intraday BP by cost.
-      // 4. Selling Day Trades (opening and closing same day) replenishes Intraday BP.
-      // 5. Selling Overnight positions does NOT replenish Intraday BP (it only adds to cash).
-      
-      if (isBuy) {
-        // Fidelity treats non-marginables (options) as 100% req, Marginable stocks as 25% (4x leverage) impact on DTBP
-        // However, "Intraday BP" usually decrements 1:1 with the *Buying Power Usage*
-        // Buying $10k stock uses $10k Intraday BP? No, usually it uses $2.5k of Maintenance Requirement...
-        // Fidelity's "Intraday BP" simplifies to: How much *Stock Value* can I buy?
-        // So if I have $100k DTBP, I can buy $100k of stock.
-        
-        const usage = totalCost; 
-        // Note: For mixed mode, we assume Intraday BP tracks Stock Capacity.
-        
-        intradayBP -= usage; 
-        auditLog.push(`Fidelity: Buy trade reduced Intraday BP by $${usage.toLocaleString()}. Remaining: $${intradayBP.toLocaleString()}`);
-
-      } else if (isSell) {
-        // Did we hold this position at start of day?
-        // Complex logic: In this engine, without persistent overnight history, we assume 
-        // trades NOT in the current "trades" array were overnight.
-        // But here we are iterating 'trades' which are *today's* trades.
-        // If we are selling something we just bought (Day Trade), we restore BP.
-        
-        // *Simulated Check*: If we are selling a position that was opened *in this session* (in `trades` list before this index), it's a day trade.
-        // For this immutable calc, we can assume all `trades` passed in are Intraday.
-        // Therefore, selling releases BP.
-        
-        const releaseAmount = tradeCost; // Approximation
-        intradayBP = Math.min(dtbpStart, intradayBP + releaseAmount);
-        auditLog.push(`Fidelity: Sell trade replenished Intraday BP up to cap. New: $${intradayBP.toLocaleString()}`);
-      }
-    
-    } else if (settings.broker === BrokerType.SCHWAB_TOS) {
-      // SCHWAB RULES:
-      // 1. DTBP updates intraday unless there is a call.
-      // 2. Leveraged ETFs reduce DTBP by Cost * Leverage.
-      
-      if (isBuy) {
-        let reduction = totalCost;
-        if (isLeveragedETF) {
-          reduction = totalCost * leverageFactor; // 3x ETF hits DTBP 3x harder logic (approximation of maintenance impact)
-          auditLog.push(`Schwab: Leveraged ETF (x${leverageFactor}) trade. $${totalCost.toLocaleString()} cost consumes $${reduction.toLocaleString()} DTBP.`);
+        if (openPositions[trade.symbol].quantity <= 0) {
+          delete openPositions[trade.symbol];
         }
-        currentDTBP -= reduction;
-      } else if (isSell) {
-        // Schwab replenishes DTBP on close
-        currentDTBP += (tradeCost - trade.fees);
       }
-      intradayBP = currentDTBP; // Schwab doesn't distinguish as strictly as Fidelity visually, but concept is same.
-    } else {
-      // GENERIC FINRA
-      // Standard flow
-      if (isBuy) intradayBP -= totalCost;
-      else intradayBP += (tradeCost - trade.fees);
     }
 
-    // --- Hard Stops & Warnings ---
-    if (intradayBP < 0) {
-      warnings.push(`Day Trade Buying Power Exceeded on trade ${trade.id}! Risk of Margin Call.`);
+    // -----------------------------
+    // 2C) DTBP usage updates (stocks/ETFs only)
+    // -----------------------------
+    if (!isOption && isBuy) {
+      let consumption = totalCost;
+
+      if (
+        settings.broker === BrokerType.SCHWAB_TOS &&
+        isLeveragedETF &&
+        leverageFactor > 1
+      ) {
+        consumption = totalCost * leverageFactor;
+        auditLog.push(
+          `Schwab: Leveraged ETF x${leverageFactor} consumes DTBP: $${consumption.toLocaleString()}`
+        );
+      }
+
+      dtbpUsed += consumption;
+      auditLog.push(
+        `DTBP: Consumed $${consumption.toLocaleString()} (used=$${dtbpUsed.toLocaleString()})`
+      );
+    } else if (!isOption && isSell) {
+      // Conservative: no intraday re-credit on sells
+      auditLog.push(`DTBP: Sell does NOT re-credit intraday DTBP (conservative).`);
+    } else if (isOption) {
+      auditLog.push(`Options: DTBP unchanged (cash-only constraint).`);
     }
+
+    intradayBP = dtbpStart - dtbpUsed;
+
+    // -----------------------------
+    // 2D) Hard-stop warning if negative
+    // -----------------------------
+    if (intradayBP < 0) {
+      warnings.push(
+        `DTBP exceeded after trade ${trade.id}! High risk of day-trade margin call.`
+      );
+    }
+    if (spendableCash < 0) {
+      warnings.push(
+        `Spendable cash went negative after trade ${trade.id}. (Conservative: pending proceeds not spendable intraday.)`
+      );
+    }
+
+    auditLog.push(
+      `State: SpendableCash=$${spendableCash.toLocaleString()}, PendingCash=$${pendingCash.toLocaleString()}, IntradayBP=$${intradayBP.toLocaleString()}`
+    );
   }
 
-  // Final Calculations for Dashboard
-  // Option BP is usually Cash - Committed on Open Orders (or just Cash available for withdrawal/non-marginable)
-  // For margin accounts, Option BP ~ Cash + Loan Value? No, usually Options are non-marginable, so strictly Cash (or Cash + Sweep).
-  // We will treat Option BP as Current Cash (simplified conservative view).
-  
+  // -----------------------------
+  // 3) Final dashboard outputs
+  // -----------------------------
+  // Option buying power = spendable cash only (pending is excluded)
+  const optionBP = Math.max(0, spendableCash);
+
   return {
-    currentEquity: equity, // In a real engine, this would float with Mark-to-Market of open positions
-    currentCash: cash,
+    currentEquity: equity, // keeping as start-of-day equity in this simplified model
+    currentCash: spendableCash + pendingCash, // informational only
     stockBP: intradayBP,
-    optionBP: Math.max(0, cash), 
+    optionBP,
     dtbpStartOfDay: dtbpStart,
-    intradayBP: intradayBP,
+    intradayBP,
     warnings: Array.from(new Set(warnings)),
     auditLog,
-    openPositions
+    openPositions,
   };
 };
