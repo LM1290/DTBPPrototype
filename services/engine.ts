@@ -12,13 +12,13 @@ import {
  *
  * Goal: NEVER get a day-trade margin call.
  *
- * Conservative rules implemented:
- * - Start-of-day DTBP is a hard cap.
- * - DTBP is consumed by ENTRIES (Buys and Short Sells).
- * - EXITS (Sells and Buy-to-Covers) do NOT re-credit DTBP intraday.
- * - Options are cash-only: option BUYs consume spendable cash.
- * - Options consume DTBP 1:1 against Stock BP.
- * - Proceeds from SELLs go to pending/unsettled cash (NOT spendable intraday).
+ * Logic Summary:
+ * 1. Start-of-Day DTBP is calculated (or overridden by user).
+ * 2. ENTRIES (Buys, Short Sells) consume DTBP.
+ * 3. EXITS (Sells, Buy-to-Covers) do NOT re-credit DTBP (Conservative Rule).
+ * 4. Options consume DTBP 1:1 against Stock BP (User Custom Rule).
+ * 5. Leveraged ETFs consume DTBP at a higher rate (Safety Rule).
+ * 6. Cash is tracked separately: Sells go to "Pending" (not spendable).
  */
 export const calculateBuyingPower = (
   settings: AccountSettings,
@@ -27,217 +27,167 @@ export const calculateBuyingPower = (
   const auditLog: string[] = [];
   const warnings: string[] = [];
 
-  // -----------------------------
-  // 1) Start-of-day state
-  // -----------------------------
-  let spendableCash = settings.startOfDayCash; // Cash available to open new trades
-  let pendingCash = 0; // Proceeds from sells (locked in conservative mode)
+  // ------------------------------------------
+  // 1. Initialize Start-of-Day State
+  // ------------------------------------------
+  let spendableCash = settings.startOfDayCash;
+  let pendingCash = 0; 
   const equity = settings.startOfDayEquity;
 
-  // FINRA-ish DTBP approximation with user override
-  const maintenanceExcess = Math.max(
-    0,
-    settings.startOfDayEquity - settings.startOfDayMaintReq
-  );
+  // Calculate Maintenance Excess (Equity - Maintenance Requirement)
+  const maintenanceExcess = Math.max(0, equity - settings.startOfDayMaintReq);
 
+  // Calculate Start-of-Day DTBP
+  // If user provided a manual DTBP (from broker dashboard), use it.
+  // Otherwise, estimate: 4x Excess for Non-PDT, 2x for Overnight/PDT restrictions usually.
   const dtbpStart =
     settings.startOfDayDTBP && settings.startOfDayDTBP > 0
       ? settings.startOfDayDTBP
       : settings.isPDT
-        ? maintenanceExcess * 4
-        : maintenanceExcess * 2;
+        ? maintenanceExcess * 4 // Standard Day Trading BP is 4x Excess
+        : maintenanceExcess * 2; // Conservative fall-back if unsure
 
-  auditLog.push(
-    `Initialization: Broker=${settings.broker}, Equity=$${equity.toLocaleString()}, SpendableCash=$${spendableCash.toLocaleString()}`
-  );
-  auditLog.push(
-    `Start-of-Day DTBP set to $${dtbpStart.toLocaleString()} (Conservative Mode)`
-  );
-
-  // DTBP consumption model: increases on ENTRIES; never decreases intraday
+  // Track consumption
   let dtbpUsed = 0;
-  let intradayBP = dtbpStart;
+  
+  // Position tracker (Symbol -> Net Quantity)
+  const openPositions: Record<string, { quantity: number; avgPrice: number }> = {};
 
-  // Position tracking (for display only)
-  const openPositions: Record<string, { quantity: number; avgPrice: number }> =
-    {};
-
-  // Sort trades by timestamp
+  // Ensure trades are processed in chronological order
   const sortedTrades = [...trades].sort((a, b) => a.timestamp - b.timestamp);
 
-  // -----------------------------
-  // 2) Trade loop
-  // -----------------------------
+  auditLog.push(`Init: Equity=$${equity}, Cash=$${spendableCash}, StartDTBP=$${dtbpStart}`);
+
+  // ------------------------------------------
+  // 2. Process Trades
+  // ------------------------------------------
   for (const trade of sortedTrades) {
     const isOption = trade.instrument === InstrumentType.OPTION;
     const isLeveragedETF = trade.instrument === InstrumentType.ETF_LEVERAGED;
-
+    
+    // Safety: Default leverage to 1 if missing
+    const leverageFactor = trade.leverageFactor || 1; 
     const multiplier = isOption ? 100 : 1;
-    const leverageFactor = trade.leverageFactor || 1;
 
-    // "Cost" here refers to the notional value controlled
-    const tradeNotional = trade.quantity * trade.price * multiplier; 
-    const totalCost = tradeNotional + trade.fees; 
+    // Calculate Financials
+    const tradeNotional = trade.quantity * trade.price * multiplier;
+    const totalCost = tradeNotional + trade.fees;
 
-    // Categorize Action
-    // ENTRY: Consumes BP (Opening a Long or Opening a Short)
+    // Determine Action Type
+    // ENTRY: Consumes Buying Power (Opening Long or Opening Short)
     const isEntry = 
       trade.side === Side.BUY || 
       trade.side === Side.SELL_SHORT;
 
-    // EXIT: Closes Position (Selling Long or Covering Short)
+    // EXIT: Closing Position (Selling Long or Covering Short)
     const isExit = 
       trade.side === Side.SELL || 
       trade.side === Side.BUY_TO_COVER;
 
     // CASH SPENDER: Actions that explicitly require cash outflow
-    const requiresCashOutlay = 
+    const requiresCash = 
       trade.side === Side.BUY || 
       trade.side === Side.BUY_TO_COVER;
 
-    auditLog.push(
-      `--- Trade ${trade.id}: ${trade.side} ${trade.quantity} ${
-        isOption ? "Contracts" : "Shares"
-      } ${trade.symbol} @ ${trade.price} ---`
-    );
-
-    // -----------------------------
-    // 2A) Pre-trade safety checks
-    // -----------------------------
-    
-    // Check 1: Spendable Cash
-    if (requiresCashOutlay) {
-      const projectedSpendableCash = spendableCash - totalCost;
-      if (projectedSpendableCash < 0) {
-        warnings.push(
-          `Insufficient SPENDABLE CASH for trade ${trade.id}. (Required: $${totalCost.toFixed(2)}, Available: $${spendableCash.toFixed(2)})`
-        );
-      }
-    }
-
-    // Check 2: DTBP (Only Entries consume BP)
-    if (isEntry) {
-      let projectedDTBPUsed = dtbpUsed;
-
-      if (!isOption) {
-        // Stocks / ETFs / Shorts
-        let consumption = totalCost;
-        if (
-          settings.broker === BrokerType.SCHWAB_TOS &&
-          isLeveragedETF &&
-          leverageFactor > 1
-        ) {
-          // Schwab rule: Leveraged ETFs consume BP based on leverage ratio
-          consumption = totalCost * leverageFactor;
-        }
-        projectedDTBPUsed += consumption;
-      } else {
-        // Options consume BP 1:1 against stock BP
-        projectedDTBPUsed += totalCost;
-      }
-
-      if (dtbpStart - projectedDTBPUsed < 0) {
-        warnings.push(
-          `DTBP would be exceeded by trade ${trade.id} (Call-avoidance mode).`
-        );
-      }
-    }
-
-    // -----------------------------
-    // 2B) Cash & Ledger updates
-    // -----------------------------
-    
-    if (requiresCashOutlay) {
-      // BUY or BUY_TO_COVER reduces spendable cash
+    // ------------------------------------------
+    // A) UPDATE CASH (Spendable vs Pending)
+    // ------------------------------------------
+    if (requiresCash) {
       spendableCash -= totalCost;
+      if (spendableCash < 0) {
+        warnings.push(`Warning: Spendable Cash went negative on trade ${trade.id} (${trade.symbol})`);
+      }
     } 
     else if (trade.side === Side.SELL) {
-      // SELL (Long) -> Proceeds go to Pending (Conservative: not reusable)
-      const netProceeds = tradeNotional - trade.fees;
-      pendingCash += netProceeds;
+      // Sells lock funds into Pending (Conservative Rule: Not reusable same-day for options)
+      pendingCash += (tradeNotional - trade.fees);
     }
-    // Note: SELL_SHORT generates cash credit, but we do not add it to Spendable
-    // in a conservative model to prevent accidental leverage usage.
+    // Note: SELL_SHORT technically generates a cash credit, but in a conservative 
+    // engine we do not treat this as spendable liquidity to avoid over-leveraging.
 
-    // -----------------------------
-    // 2C) DTBP usage updates (CONSERVATIVE)
-    // -----------------------------
+    // ------------------------------------------
+    // B) UPDATE DTBP (Entries Consume, Exits Ignore)
+    // ------------------------------------------
     if (isEntry) {
-      // Entries (Buy or Short) consume BP
-      if (!isOption) {
-        let consumption = totalCost;
-        if (
-          settings.broker === BrokerType.SCHWAB_TOS &&
-          isLeveragedETF &&
-          leverageFactor > 1
-        ) {
-          consumption = totalCost * leverageFactor;
-          auditLog.push(`Schwab Leveraged ETF penalty applied: $${consumption}`);
-        }
-        dtbpUsed += consumption;
-      } else {
-        dtbpUsed += totalCost;
+      let consumption = totalCost;
+
+      if (isOption) {
+        // RULE: Options consume DTBP 1:1.
+        // Reason: Options are non-marginable, so they reduce Buying Power dollar-for-dollar.
+        consumption = totalCost;
+        auditLog.push(`Trade ${trade.id} (Option): Consumed $${consumption} DTBP`);
+      } 
+      else if (isLeveragedETF && leverageFactor > 1) {
+        // RULE: Leveraged ETFs consume DTBP based on Higher Maint Req.
+        // If a 3x ETF has a 75% Maintenance Req, it consumes BP 3x faster than a stock (25% req).
+        // We cap this penalty at 4x (equivalent to 100% cash requirement).
+        const penaltyMultiplier = Math.min(leverageFactor, 4);
+        consumption = totalCost * penaltyMultiplier;
+        
+        auditLog.push(`Trade ${trade.id} (Lev ETF x${leverageFactor}): Consumed $${consumption} DTBP (Penalty Applied)`);
+      } 
+      else {
+        // Standard Stock (Marginable)
+        // Consumes DTBP 1:1 on the notional value.
+        consumption = totalCost;
       }
-      
-      auditLog.push(`DTBP Used increased to $${dtbpUsed.toLocaleString()}`);
+
+      dtbpUsed += consumption;
     } 
     else if (isExit) {
-      // Exits (Sell or Cover) do NOT reduce dtbpUsed in Conservative Mode
-      auditLog.push(`DTBP: Exit trade does NOT recycle BP (Conservative).`);
+      // Exit: Do NOT decrease dtbpUsed (Conservative Rule).
+      // Standard FINRA rules say you reclaim BP, but for "Call Avoidance", we assume 
+      // intraday BP does not replenish to prevent over-trading.
+      auditLog.push(`Trade ${trade.id} (Exit): No DTBP credit returned (Conservative Mode).`);
     }
 
-    intradayBP = dtbpStart - dtbpUsed;
-
-    // -----------------------------
-    // 2D) Position Tracking (Simplified for Display)
-    // -----------------------------
+    // ------------------------------------------
+    // C) Update Positions (Display Only)
+    // ------------------------------------------
+    const direction = (trade.side === Side.BUY || trade.side === Side.BUY_TO_COVER) ? 1 : -1;
+    
     if (!openPositions[trade.symbol]) {
-      openPositions[trade.symbol] = { quantity: 0, avgPrice: 0 };
-    }
-    const pos = openPositions[trade.symbol];
-
-    if (isEntry) {
-      // Logic handles both Longs (Positive qty) and Shorts (Negative qty logic could go here, 
-      // but for simple risk display, we usually just track absolute exposure or net qty).
-      // Here we assume standard Long/Short netting:
-      const direction = trade.side === Side.BUY ? 1 : -1;
-      const tradeQty = trade.quantity * direction;
-      
-      // Update weighted average only if increasing position size
-      const newQty = pos.quantity + tradeQty;
-      pos.quantity = newQty;
-      pos.avgPrice = trade.price; // Simplified; real avg cost requires deeper logic
-    } else {
-      // Closing
-      const direction = trade.side === Side.SELL ? -1 : 1; // Sell reduces long, Cover increases back to 0
-      pos.quantity += (trade.quantity * direction);
+        openPositions[trade.symbol] = { quantity: 0, avgPrice: 0 };
     }
     
-    if (pos.quantity === 0) delete openPositions[trade.symbol];
-
-    // -----------------------------
-    // 2E) Hard-stop warnings
-    // -----------------------------
-    if (intradayBP < 0) {
-      warnings.push(`CRITICAL: DTBP Exceeded after trade ${trade.id}.`);
+    // Update Avg Price only on Entry
+    if (isEntry) {
+        const oldQty = openPositions[trade.symbol].quantity;
+        const newQty = oldQty + (trade.quantity * direction);
+        // Simple weighted average approx
+        if (newQty !== 0) {
+             const oldCost = oldQty * openPositions[trade.symbol].avgPrice;
+             const newCost = trade.quantity * trade.price; // ignoring fees for simple display
+             openPositions[trade.symbol].avgPrice = (oldCost + newCost) / newQty;
+        }
+        openPositions[trade.symbol].quantity = newQty;
+    } else {
+        openPositions[trade.symbol].quantity += (trade.quantity * direction);
     }
-    if (spendableCash < 0) {
-      warnings.push(`CRITICAL: Spendable Cash negative after trade ${trade.id}.`);
+    
+    // Clean up closed positions
+    if (Math.abs(openPositions[trade.symbol].quantity) < 0.0001) {
+        delete openPositions[trade.symbol];
     }
   }
 
-  // -----------------------------
-  // 3) Final dashboard outputs
-  // -----------------------------
-  const optionBP = Math.max(0, spendableCash);
+  // ------------------------------------------
+  // 3. Final Calculations & Safety Checks
+  // ------------------------------------------
+  const intradayBP = Math.max(0, dtbpStart - dtbpUsed);
+  const optionBP = Math.max(0, spendableCash); // Options strictly limited by cash
+
+  if (intradayBP <= 0) {
+      warnings.push("CRITICAL: Day Trading Buying Power Depleted");
+  }
 
   return {
     currentEquity: equity,
     currentCash: spendableCash + pendingCash,
     stockBP: intradayBP,
-    optionBP,
+    optionBP: optionBP,
     dtbpStartOfDay: dtbpStart,
-    intradayBP,
+    intradayBP: intradayBP,
     warnings: Array.from(new Set(warnings)),
     auditLog,
     openPositions,
