@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AccountSettings, DEFAULT_SETTINGS, Trade, CalculationResult } from './types';
 import { calculateBuyingPower } from './services/engine';
+import { db } from './services/supabase';
 import { SettingsPanel } from './components/SettingsPanel';
 import { TradeForm } from './components/TradeForm';
 import { Dashboard } from './components/Dashboard';
@@ -11,26 +12,41 @@ export default function App() {
   const [settings, setSettings] = useState<AccountSettings>(DEFAULT_SETTINGS);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'reconcile'>('dashboard');
+  
   const [calculationResult, setCalculationResult] = useState<CalculationResult>(
     calculateBuyingPower(DEFAULT_SETTINGS, [])
   );
   
-  // Scenario Mode State
+  // Scenario/Preview State
   const [previewTrade, setPreviewTrade] = useState<Trade | null>(null);
   const [scenarioResult, setScenarioResult] = useState<CalculationResult | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'reconcile'>('dashboard');
 
-  // Recalculate whenever inputs change
+  // 1. Initial load from Supabase
+  useEffect(() => {
+    const initData = async () => {
+      const savedTrades = await db.loadTrades();
+      if (savedTrades.length > 0) {
+        setTrades(savedTrades);
+      }
+    };
+    initData();
+  }, []);
+
+  // 2. Sync and Recalculate
   useEffect(() => {
     const res = calculateBuyingPower(settings, trades);
     setCalculationResult(res);
+    
+    if (trades.length > 0) {
+      db.saveTrades(trades);
+    }
   }, [settings, trades]);
 
-  // Handle Scenario Calculation
+  // 3. Scenario Calculation
   useEffect(() => {
     if (previewTrade) {
-      const scenarioTrades = [...trades, previewTrade];
-      setScenarioResult(calculateBuyingPower(settings, scenarioTrades));
+      setScenarioResult(calculateBuyingPower(settings, [...trades, previewTrade]));
     } else {
       setScenarioResult(null);
     }
@@ -40,38 +56,30 @@ export default function App() {
     setTrades(prev => [...prev, trade]);
   };
 
-  const handleDeleteTrade = (id: string) => {
+  const handleDeleteTrade = async (id: string) => {
     setTrades(prev => prev.filter(t => t.id !== id));
+    await db.deleteTrade(id); // Ensure cloud deletion
   };
 
-  const handleResetSession = () => {
-    if (window.confirm("Are you sure you want to clear all trades and reset the session?")) {
+  const handleResetSession = async () => {
+    if (window.confirm("Are you sure? This will clear local state. (Cloud data remains unless manually purged).")) {
       setTrades([]);
     }
   };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-blue-500/30">
-      
-      {/* Header */}
       <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShieldCheck className="text-blue-500" />
             <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
-              True DTBP
+              True DTBP + Option Engine
             </h1>
-            <span className="hidden sm:inline-block text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 ml-2">
-              {settings.broker} Mode
-            </span>
           </div>
           
           <div className="flex items-center gap-4">
-             <button 
-              onClick={handleResetSession}
-              className="text-slate-400 hover:text-rose-400 transition-colors p-2"
-              title="Reset Session (Clear All Trades)"
-            >
+             <button onClick={handleResetSession} className="text-slate-400 hover:text-rose-400 p-2" title="Reset Local Session">
               <RotateCcw size={20} />
             </button>
             <div className="h-6 w-px bg-slate-800"></div>
@@ -87,19 +95,14 @@ export default function App() {
             >
               Dashboard
             </button>
-            <button 
-              onClick={() => setIsSettingsOpen(true)}
-              className="text-slate-400 hover:text-white transition-colors"
-            >
+            <button onClick={() => setIsSettingsOpen(true)} className="text-slate-400 hover:text-white">
               <Settings size={20} />
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 py-8">
-        
         {activeTab === 'dashboard' ? (
           <div className="space-y-6">
             <TradeForm onAddTrade={handleAddTrade} onPreview={setPreviewTrade} />
@@ -113,7 +116,6 @@ export default function App() {
         ) : (
           <Reconciliation calculated={calculationResult} />
         )}
-
       </main>
 
       <SettingsPanel 
@@ -122,16 +124,12 @@ export default function App() {
         isOpen={isSettingsOpen} 
         onClose={() => setIsSettingsOpen(false)} 
       />
-      
-      {/* Disclaimer Footer */}
+
       <footer className="max-w-7xl mx-auto px-4 py-8 text-center border-t border-slate-800 mt-8">
         <p className="text-xs text-slate-600">
-          DISCLAIMER: This application is a simulation and planning tool only. Broker margin rules are complex and subject to change. 
-          Real-time broker data may differ due to intraday volatility, specific house rules, or delayed reporting. 
-          Always confirm buying power with your broker before executing trades. Not financial advice.
+          Excel Parity Engine v1.0 | Supabase Cloud Sync Active | RLS Enabled
         </p>
       </footer>
-
     </div>
   );
 }
