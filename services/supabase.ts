@@ -2,8 +2,8 @@ import { createClient } from '@supabase/supabase-js';
 import { Trade } from '../types';
 
 // Hardcoded credentials as requested
-const supabaseUrl = 'https://YOUR_PROJECT_ID.supabase.co';
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'; 
+const supabaseUrl = 'https://zhvamtwqhwkhieumpfjs.supabase.co';
+const supabaseAnonKey = 'sb_publishable_sGdjJ3oB4S31G52RMqwhKw_J9WnR0Q-'; 
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
