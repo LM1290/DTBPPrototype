@@ -2,8 +2,8 @@ import { createClient } from '@supabase/supabase-js';
 import { Trade } from '../types';
 
 // Replace with your actual credentials
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'YOUR_SUPABASE_URL';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'YOUR_SUPABASE_ANON_KEY';
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://zhvamtwqhwkhieumpfjs.supabase.co';
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_sGdjJ3oB4S31G52RMqwhKw_J9WnR0Q-';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
