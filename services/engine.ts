@@ -1,71 +1,65 @@
 import { AccountSettings, CalculationResult, InstrumentType, Side, Trade } from "../types";
 
-// Standard House Requirements for high-volatility tickers
+// Excel Parity: Standard 25% or House Reqs
 const SPECIAL_MARGIN_REQS: Record<string, number> = {
-  "AVGO": 0.30, "SPY": 0.30, "QQQ": 0.30, "TSLA": 0.40,
-  "NVDA": 0.30, "MSTR": 1.00, "AMD": 0.30,
+  "AVGO": 0.30, "SPY": 0.25, "QQQ": 0.25, "TSLA": 0.40, "NVDA": 0.30, "MSTR": 1.00,
 };
 
 export const calculateBuyingPower = (settings: AccountSettings, trades: Trade[]): CalculationResult => {
+  const auditLog: string[] = [];
+  const warnings: string[] = [];
   let currentEquity = settings.startOfDayEquity;
   let maintenanceReq = 0;
   let dtbpUsed = 0;
-  const warnings: string[] = [];
-  const openPositions: Record<string, { quantity: number; avgPrice: number }> = {};
 
   const maintenanceExcessStart = Math.max(0, settings.startOfDayEquity - settings.startOfDayMaintReq);
   const dtbpCap = settings.startOfDayDTBP || (settings.isPDT ? maintenanceExcessStart * 4 : maintenanceExcessStart * 2);
 
-  [...trades].sort((a, b) => a.timestamp - b.timestamp).forEach(trade => {
+  auditLog.push(`[Init] Equity: $${currentEquity.toLocaleString()} | DTBP Cap: $${dtbpCap.toLocaleString()}`);
+
+  [...trades].sort((a, b) => a.timestamp - b.timestamp).forEach((trade, idx) => {
     const isOption = trade.instrument === InstrumentType.OPTION;
     const multiplier = isOption ? 100 : 1;
-    const tradeNotional = trade.quantity * trade.price * multiplier;
     
-    // Excel-Parity: Profit Adjustment math
-    const profitAdj = trade.price * trade.quantity * multiplier;
+    // Excel Parity: Contracts * Price * 100 for Options
+    const notional = Math.abs(trade.quantity) * trade.price * multiplier;
+    const symbol = trade.symbol.toUpperCase();
 
-    // Margin Requirement Logic
-    let reqPercent = isOption ? 1.00 : (SPECIAL_MARGIN_REQS[trade.symbol] || 0.25);
-    if (trade.side === Side.SELL_SHORT) reqPercent = Math.max(reqPercent, 0.30);
-
-    if (trade.side === Side.BUY || trade.side === Side.SELL_SHORT) {
-      maintenanceReq += (tradeNotional * reqPercent);
-      dtbpUsed += (tradeNotional + trade.fees);
-      currentEquity -= trade.fees;
+    let reqPercent = isOption ? 1.00 : (SPECIAL_MARGIN_REQS[symbol] || 0.25);
+    
+    // Logic: Buying power consumption is 1:1 for the notional value
+    const isEntry = trade.quantity > 0;
+    
+    if (isEntry) {
+      dtbpUsed += notional;
+      maintenanceReq += (notional * reqPercent);
+      currentEquity -= (trade.fees || 0);
+      auditLog.push(`${idx + 1}. BUY ${trade.quantity} ${symbol} @ $${trade.price}: $${notional.toLocaleString()} Notional | Consumption: $${notional.toLocaleString()}`);
     } else {
-      maintenanceReq -= (tradeNotional * reqPercent);
-      // PnL calculation matching spreadsheet tracker logic
-      const pos = openPositions[trade.symbol];
-      if (pos) {
-        const costBasis = pos.avgPrice * trade.quantity * multiplier;
-        currentEquity += (trade.side === Side.SELL ? (tradeNotional - costBasis) : (costBasis - tradeNotional));
-      }
-      currentEquity -= trade.fees;
+      maintenanceReq -= (notional * reqPercent);
+      currentEquity -= (trade.fees || 0);
+      // In Excel logic, selling releases BP based on the net effect
+      auditLog.push(`${idx + 1}. SELL ${trade.quantity} ${symbol}: Released $${notional.toLocaleString()} BP`);
     }
-
-    // Position Tracking
-    if (!openPositions[trade.symbol]) openPositions[trade.symbol] = { quantity: 0, avgPrice: 0 };
-    const factor = (trade.side === Side.BUY || trade.side === Side.SELL_SHORT) ? 1 : -1;
-    openPositions[trade.symbol].quantity += (trade.quantity * factor);
   });
 
-  // Advanced Margin Call Calculator
   const marginExcess = currentEquity - maintenanceReq;
   if (marginExcess < 0) {
-    const deficit = Math.abs(marginExcess);
-    const liquidationNeeded = deficit / 0.30; // Estimated based on 30% house req
-    warnings.push(`MARGIN CALL: $${deficit.toLocaleString()} deficit. Liquidate ~$${liquidationNeeded.toLocaleString()} to clear.`);
+    warnings.push(`MARGIN CALL: $${Math.abs(marginExcess).toLocaleString()} deficit`);
   }
+
+  // Final BP = (Total DTBP Capacity - Used DTBP), capped by (Excess Equity * 4)
+  const stockBP = Math.max(0, Math.min(dtbpCap - dtbpUsed, marginExcess * 4));
 
   return {
     currentEquity,
     currentCash: Math.max(0, marginExcess),
-    stockBP: Math.min(Math.max(0, dtbpCap - dtbpUsed), Math.max(0, marginExcess * 4)),
+    stockBP,
     optionBP: Math.max(0, marginExcess),
     dtbpStartOfDay: dtbpCap,
-    intradayBP: 0, // Simplified for this view
+    intradayBP: 0,
     warnings,
-    auditLog: [],
-    openPositions
+    auditLog,
+    openPositions: {}
   };
 };
