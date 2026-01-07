@@ -1,139 +1,99 @@
 import React, { useState, useEffect } from 'react';
-import { AccountSettings, DEFAULT_SETTINGS, Trade, CalculationResult } from './types';
+import { Trade, CalculationResult, DEFAULT_SETTINGS } from './types';
 import { calculateBuyingPower } from './services/engine';
-import { db } from './services/supabase';
-import { SettingsPanel } from './components/SettingsPanel';
-import { TradeForm } from './components/TradeForm';
+import { db, supabase } from './services/supabase';
 import { Dashboard } from './components/Dashboard';
-import { Reconciliation } from './components/Reconciliation';
-import { Settings, ShieldCheck, RefreshCw, RotateCcw } from 'lucide-react';
+import { TradeForm } from './components/TradeForm';
+import { ShieldCheck, LogIn, UserPlus, LogOut, Clock, Calendar } from 'lucide-react';
 
 export default function App() {
-  const [settings, setSettings] = useState<AccountSettings>(DEFAULT_SETTINGS);
-  const [trades, setTrades] = useState<Trade[]>([]);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'reconcile'>('dashboard');
+  const [session, setSession] = useState<any>(null);
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   
+  const [trades, setTrades] = useState<Trade[]>([]);
   const [calculationResult, setCalculationResult] = useState<CalculationResult>(
     calculateBuyingPower(DEFAULT_SETTINGS, [])
   );
-  
-  // Scenario/Preview State for "What-If" Analysis
-  const [previewTrade, setPreviewTrade] = useState<Trade | null>(null);
-  const [scenarioResult, setScenarioResult] = useState<CalculationResult | null>(null);
 
-  // 1. Initial load: Fetch from Supabase Cloud
+  // Auth Listener
   useEffect(() => {
-    const initData = async () => {
-      const savedTrades = await db.loadTrades();
-      if (savedTrades.length > 0) {
-        setTrades(savedTrades);
-      }
-    };
-    initData();
+    supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    return () => subscription.unsubscribe();
   }, []);
 
-  // 2. Sync and Recalculate: Run engine on every state change
+  // Load User Data
   useEffect(() => {
-    const res = calculateBuyingPower(settings, trades);
-    setCalculationResult(res);
-    
-    // Auto-save to cloud
-    if (trades.length > 0) {
+    if (session) {
+      db.loadTrades().then(data => setTrades(data));
+    }
+  }, [session]);
+
+  // Recalculate and Sync
+  useEffect(() => {
+    if (session) {
+      setCalculationResult(calculateBuyingPower(DEFAULT_SETTINGS, trades));
       db.saveTrades(trades);
     }
-  }, [settings, trades]);
+  }, [trades, session]);
 
-  // 3. Scenario Calculation: Real-time preview while filling the form
-  useEffect(() => {
-    if (previewTrade) {
-      setScenarioResult(calculateBuyingPower(settings, [...trades, previewTrade]));
-    } else {
-      setScenarioResult(null);
-    }
-  }, [previewTrade, settings, trades]);
-
-  const handleAddTrade = (trade: Trade) => {
-    setTrades(prev => [...prev, trade]);
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const { error } = authMode === 'signup' 
+      ? await db.signUp(email, password) 
+      : await db.signIn(email, password);
+    if (error) alert(error.message);
   };
 
-  const handleDeleteTrade = async (id: string) => {
-    setTrades(prev => prev.filter(t => t.id !== id));
-    await db.deleteTrade(id); 
-  };
-
-  const handleResetSession = async () => {
-    if (window.confirm("Clear local state? Cloud data persists unless deleted in DB.")) {
-      setTrades([]);
-    }
-  };
+  if (!session) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+        <div className="bg-slate-900 p-8 rounded-2xl border border-slate-800 w-full max-w-md">
+          <h2 className="text-2xl font-bold text-white mb-6 text-center">
+            {authMode === 'signup' ? 'Create Account' : 'Sign In to True DTBP'}
+          </h2>
+          <form onSubmit={handleAuth} className="space-y-4">
+            <input type="email" placeholder="Email" className="w-full bg-slate-800 p-3 rounded text-white border border-slate-700" 
+              onChange={e => setEmail(e.target.value)} required />
+            <input type="password" placeholder="Password" className="w-full bg-slate-800 p-3 rounded text-white border border-slate-700" 
+              onChange={e => setPassword(e.target.value)} required />
+            <button className="w-full bg-blue-600 py-3 rounded font-bold text-white hover:bg-blue-500 transition-colors">
+              {authMode === 'signup' ? 'Sign Up' : 'Sign In'}
+            </button>
+          </form>
+          <button onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')} className="w-full text-slate-500 text-sm mt-4 hover:text-white">
+            {authMode === 'signin' ? 'Need an account? Sign Up' : 'Have an account? Sign In'}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-blue-500/30">
+    <div className="min-h-screen bg-slate-950 text-slate-200">
+      <header className="bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center">
+        <div className="flex items-center gap-2"><ShieldCheck className="text-blue-500" /><h1 className="font-bold">True DTBP</h1></div>
+        <button onClick={() => db.signOut()} className="text-slate-400 hover:text-rose-400 flex items-center gap-1 text-sm"><LogOut size={16} /> Logout</button>
+      </header>
       
-      {/* Navigation Header */}
-      <header className="bg-slate-900 border-b border-slate-800 sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="text-blue-500" />
-            <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
-              True DTBP + Option Tracker
-            </h1>
-          </div>
-          
-          <div className="flex items-center gap-4">
-             <button onClick={handleResetSession} className="text-slate-400 hover:text-rose-400 p-2" title="Reset UI State">
-              <RotateCcw size={20} />
-            </button>
-            <div className="h-6 w-px bg-slate-800"></div>
-             <button 
-              onClick={() => setActiveTab('reconcile')}
-              className={`text-sm font-medium flex items-center gap-2 px-3 py-1.5 rounded transition-colors ${activeTab === 'reconcile' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}
-            >
-              <RefreshCw size={16} /> <span className="hidden sm:inline">Weekly Reconciliation</span>
-            </button>
-            <button 
-              onClick={() => setActiveTab('dashboard')}
-               className={`text-sm font-medium flex items-center gap-2 px-3 py-1.5 rounded transition-colors ${activeTab === 'dashboard' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}
-            >
-              Dashboard
-            </button>
-            <button onClick={() => setIsSettingsOpen(true)} className="text-slate-400 hover:text-white">
-              <Settings size={20} />
-            </button>
+      <main className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+        <TradeForm onAddTrade={(t) => setTrades([...trades, t])} onPreview={() => {}} />
+        
+        {/* Dashboard now receives date/time formatted trades */}
+        <Dashboard data={calculationResult} trades={trades} onDeleteTrade={(id) => setTrades(trades.filter(t => t.id !== id))} />
+        
+        {/* Restored Audit Trail */}
+        <div className="bg-black/40 p-4 rounded-xl border border-slate-800 h-48 overflow-y-auto">
+          <h3 className="text-xs font-bold text-slate-600 uppercase mb-2">Math Audit Trail</h3>
+          <div className="space-y-1 font-mono text-[11px] text-slate-500">
+            {calculationResult.auditLog.map((log, i) => <div key={i}>{log}</div>)}
           </div>
         </div>
-      </header>
-
-      {/* Main Viewport */}
-      <main className="max-w-7xl mx-auto px-4 py-8">
-        {activeTab === 'dashboard' ? (
-          <div className="space-y-6">
-            <TradeForm onAddTrade={handleAddTrade} onPreview={setPreviewTrade} />
-            <Dashboard 
-              data={calculationResult} 
-              trades={trades} 
-              scenarioData={scenarioResult}
-              onDeleteTrade={handleDeleteTrade}
-            />
-          </div>
-        ) : (
-          <Reconciliation calculated={calculationResult} trades={trades} />
-        )}
       </main>
-
-      <SettingsPanel 
-        settings={settings} 
-        onSave={setSettings} 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)} 
-      />
-
-      <footer className="max-w-7xl mx-auto px-4 py-8 text-center border-t border-slate-800 mt-8">
-        <p className="text-xs text-slate-600">
-          Excel Parity Engine | Cloud Sync Status: {trades.length > 0 ? 'Connected' : 'Standby'}
-        </p>
-      </footer>
     </div>
   );
 }
