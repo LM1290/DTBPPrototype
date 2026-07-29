@@ -1,90 +1,100 @@
-import { createClient } from '@supabase/supabase-js';
-import { Trade, AccountSettings } from '../types';
+import { createClient, Session } from "@supabase/supabase-js";
+import { AccountSettings, Trade } from "../types";
 
-// Hardcoded credentials for the prototype
-const supabaseUrl = 'https://zhvamtwqhwkhieumpfjs.supabase.co';
-const supabaseAnonKey = 'sb_publishable_sGdjJ3oB4S31G52RMqwhKw_J9WnR0Q-';
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim();
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const isCloudConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+export const supabase = isCloudConfigured
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    })
+  : null;
 
-export const db = {
-  // --- AUTHENTICATION ---
-  async signUp(email: string, pass: string) {
-    return await supabase.auth.signUp({ email, password: pass });
+export interface CloudState {
+  settings: AccountSettings;
+  trades: Trade[];
+  updatedAt: string;
+}
+
+const requireClient = () => {
+  if (!supabase) throw new Error("Cloud sync is not configured.");
+  return supabase;
+};
+
+const requireUser = async () => {
+  const client = requireClient();
+  const { data, error } = await client.auth.getUser();
+  if (error) throw error;
+  if (!data.user) throw new Error("Sign in before syncing.");
+  return data.user;
+};
+
+export const cloud = {
+  async getSession(): Promise<Session | null> {
+    if (!supabase) return null;
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    return data.session;
   },
 
-  async signIn(email: string, pass: string) {
-    return await supabase.auth.signInWithPassword({ email, password: pass });
+  onAuthChange(callback: (session: Session | null) => void) {
+    if (!supabase) return () => undefined;
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => callback(session));
+    return () => data.subscription.unsubscribe();
+  },
+
+  async signUp(email: string, password: string) {
+    const client = requireClient();
+    const { error } = await client.auth.signUp({ email, password });
+    if (error) throw error;
+  },
+
+  async signIn(email: string, password: string) {
+    const client = requireClient();
+    const { error } = await client.auth.signInWithPassword({ email, password });
+    if (error) throw error;
   },
 
   async signOut() {
-    await supabase.auth.signOut();
+    const client = requireClient();
+    const { error } = await client.auth.signOut();
+    if (error) throw error;
   },
 
-  // --- TRADES MANAGEMENT ---
-  async saveTrades(trades: Trade[]) {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    // Map user_id to trades and ensure we use 'id' as the conflict target
-    const tradesWithUser = trades.map(t => ({
-      ...t,
-      user_id: user.id
-    }));
-
-    const { error } = await supabase
-      .from('trades')
-      .upsert(tradesWithUser, { onConflict: 'id' });
-
-    if (error) console.error('Supabase Save Error:', error.message);
+  async load(): Promise<CloudState | null> {
+    const client = requireClient();
+    const user = await requireUser();
+    const { data, error } = await client
+      .from("account_states")
+      .select("settings,trades,updated_at")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    return {
+      settings: data.settings as AccountSettings,
+      trades: data.trades as Trade[],
+      updatedAt: data.updated_at,
+    };
   },
 
-  async loadTrades(): Promise<Trade[]> {
-    const { data, error } = await supabase
-      .from('trades')
-      .select('*')
-      .order('timestamp', { ascending: true });
-
-    if (error) {
-      console.error('Supabase Load Error:', error.message);
-      return [];
-    }
-    return data || [];
-  },
-
-  async deleteTrade(id: string) {
-    const { error } = await supabase
-      .from('trades')
-      .delete()
-      .eq('id', id);
-    if (error) console.error('Supabase Delete Error:', error.message);
-  },
-
-  // --- SETTINGS PERSISTENCE ---
-  async saveSettings(settings: AccountSettings) {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    const { error } = await supabase
-      .from('user_settings')
-      .upsert({
+  async save(settings: AccountSettings, trades: Trade[]) {
+    const client = requireClient();
+    const user = await requireUser();
+    const { error } = await client.from("account_states").upsert(
+      {
         user_id: user.id,
-        ...settings
-      }, { onConflict: 'user_id' });
-
-    if (error) console.error('Settings Save Error:', error.message);
+        settings,
+        trades,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" },
+    );
+    if (error) throw error;
   },
-
-  async loadSettings(): Promise<AccountSettings | null> {
-    const { data, error } = await supabase
-      .from('user_settings')
-      .select('*')
-      .single();
-
-    if (error && error.code !== 'PGRST116') { // Ignore "no rows found" error
-      console.error('Settings Load Error:', error.message);
-      return null;
-    }
-    return data;
-  }
 };

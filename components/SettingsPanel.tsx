@@ -1,116 +1,200 @@
-import React from 'react';
-import { AccountSettings, AccountType, BrokerType, DEFAULT_SETTINGS } from '../types';
+import { useEffect, useState } from "react";
+import { Info, X } from "lucide-react";
+import {
+  AccountSettings,
+  AccountType,
+  DtbpMethod,
+  MarginRegime,
+} from "../types";
 
 interface Props {
-  settings: AccountSettings;
-  onSave: (s: AccountSettings) => void;
   isOpen: boolean;
+  settings: AccountSettings;
+  onSave: (settings: AccountSettings) => void;
   onClose: () => void;
 }
 
-export const SettingsPanel: React.FC<Props> = ({ settings, onSave, isOpen, onClose }) => {
-  const [localSettings, setLocalSettings] = React.useState<AccountSettings>(settings);
+export function SettingsPanel({ isOpen, settings, onSave, onClose }: Props) {
+  const [draft, setDraft] = useState(settings);
+
+  useEffect(() => setDraft(settings), [settings, isOpen]);
 
   if (!isOpen) return null;
 
+  const set = <K extends keyof AccountSettings>(key: K, value: AccountSettings[K]) =>
+    setDraft((current) => ({ ...current, [key]: value }));
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
-      <div className="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-lg shadow-2xl p-6 max-h-[90vh] overflow-y-auto">
-        <h2 className="text-2xl font-bold text-white mb-6 border-b border-slate-700 pb-2">Configuration</h2>
-        
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-slate-400 text-sm mb-1">Broker Logic</label>
-              <select 
-                className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
-                value={localSettings.broker}
-                onChange={(e) => setLocalSettings({...localSettings, broker: e.target.value as BrokerType})}
-              >
-                {Object.values(BrokerType).map(b => <option key={b} value={b}>{b}</option>)}
-              </select>
-              <p className="text-xs text-slate-500 mt-1">
-                {localSettings.broker === BrokerType.FIDELITY && "Uses fixed Start-of-Day DTBP. Intraday gains restore BP, overnight sales do not."}
-                {localSettings.broker === BrokerType.SCHWAB_TOS && "Dynamic DTBP. Leveraged ETFs consume extra BP."}
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-slate-400 text-sm mb-1">Account Type</label>
-              <select 
-                className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
-                value={localSettings.accountType}
-                onChange={(e) => setLocalSettings({...localSettings, accountType: e.target.value as AccountType})}
-              >
-                <option value={AccountType.MARGIN}>Margin</option>
-                <option value={AccountType.CASH}>Cash</option>
-              </select>
-            </div>
-            
-            <div className="flex items-center space-x-3 mt-4">
-              <input 
-                type="checkbox" 
-                id="isPDT"
-                className="w-5 h-5 rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-blue-500"
-                checked={localSettings.isPDT}
-                onChange={(e) => setLocalSettings({...localSettings, isPDT: e.target.checked})}
-              />
-              <label htmlFor="isPDT" className="text-white">Pattern Day Trader (PDT)</label>
-            </div>
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="sheet-header">
+          <div>
+            <span className="eyebrow">Opening snapshot</span>
+            <h2 id="settings-title">Account configuration</h2>
+            <p>Copy these balances from your broker before the first tracked trade.</p>
           </div>
-
-          <div className="border-t border-slate-700 pt-4">
-            <h3 className="text-lg text-blue-400 font-semibold mb-3">Start of Day Values</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-slate-400 text-sm mb-1">Prior Day Equity ($)</label>
-                <input 
-                  type="number"
-                  className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
-                  value={localSettings.startOfDayEquity}
-                  onChange={(e) => setLocalSettings({...localSettings, startOfDayEquity: Number(e.target.value)})}
-                />
-              </div>
-              <div>
-                <label className="block text-slate-400 text-sm mb-1">Prior Day Maint. Req ($)</label>
-                <input 
-                  type="number"
-                  className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
-                  value={localSettings.startOfDayMaintReq}
-                  onChange={(e) => setLocalSettings({...localSettings, startOfDayMaintReq: Number(e.target.value)})}
-                />
-              </div>
-              <div>
-                <label className="block text-slate-400 text-sm mb-1">Start Cash Balance ($)</label>
-                <input 
-                  type="number"
-                  className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
-                  value={localSettings.startOfDayCash}
-                  onChange={(e) => setLocalSettings({...localSettings, startOfDayCash: Number(e.target.value)})}
-                />
-              </div>
-              <div>
-                <label className="block text-slate-400 text-sm mb-1">Broker DTBP Override ($)</label>
-                <input 
-                  type="number"
-                  placeholder="Optional"
-                  className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
-                  value={localSettings.startOfDayDTBP || ''}
-                  onChange={(e) => setLocalSettings({...localSettings, startOfDayDTBP: Number(e.target.value)})}
-                />
-                <p className="text-xs text-slate-500 mt-1">Leave 0 to calculate from Equity/Maint.</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-8 flex justify-end space-x-4">
-          <button onClick={onClose} className="px-4 py-2 text-slate-300 hover:text-white">Cancel</button>
-          <button onClick={() => { onSave(localSettings); onClose(); }} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded">
-            Save Configuration
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close settings">
+            <X />
           </button>
+        </header>
+
+        <div className="sheet-body">
+          <div className="settings-section">
+            <div className="settings-section-title">
+              <span>01</span>
+              <div>
+                <h3>Account identity</h3>
+                <p>Labels only. No brokerage connection is made.</p>
+              </div>
+            </div>
+            <div className="settings-grid">
+              <label className="field">
+                <span>Account name</span>
+                <input value={draft.accountName} onChange={(event) => set("accountName", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>Broker</span>
+                <input value={draft.brokerName} onChange={(event) => set("brokerName", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>Account type</span>
+                <select value={draft.accountType} onChange={(event) => set("accountType", event.target.value as AccountType)}>
+                  <option value={AccountType.MARGIN}>Margin account</option>
+                  <option value={AccountType.CASH}>Cash account</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Snapshot date</span>
+                <input type="date" value={draft.snapshotDate} onChange={(event) => set("snapshotDate", event.target.value)} />
+              </label>
+            </div>
+          </div>
+
+          {draft.accountType === AccountType.MARGIN ? (
+            <>
+              <div className="settings-section">
+                <div className="settings-section-title">
+                  <span>02</span>
+                  <div>
+                    <h3>Broker regime</h3>
+                    <p>Firms may transition to FINRA’s new intraday standard through October 20, 2027.</p>
+                  </div>
+                </div>
+                <div className="choice-grid">
+                  <button className={`choice-card ${draft.marginRegime === MarginRegime.LEGACY_PDT ? "selected" : ""}`} type="button" onClick={() => set("marginRegime", MarginRegime.LEGACY_PDT)}>
+                    <strong>Legacy PDT / DTBP</strong>
+                    <span>Prior-day maintenance excess × 4, with the $25,000 PDT minimum.</span>
+                  </button>
+                  <button className={`choice-card ${draft.marginRegime === MarginRegime.INTRADAY_MARGIN ? "selected" : ""}`} type="button" onClick={() => set("marginRegime", MarginRegime.INTRADAY_MARGIN)}>
+                    <strong>New intraday margin</strong>
+                    <span>Tracks intraday margin level and the largest negative IML.</span>
+                  </button>
+                </div>
+                {draft.marginRegime === MarginRegime.LEGACY_PDT && (
+                  <div className="inline-fields">
+                    <label className="field">
+                      <span>DTBP calculation method</span>
+                      <select value={draft.dtbpMethod} onChange={(event) => set("dtbpMethod", event.target.value as DtbpMethod)}>
+                        <option value={DtbpMethod.TIME_AND_TICK}>Time and tick (peak open commitment)</option>
+                        <option value={DtbpMethod.AGGREGATE}>Aggregate trading commitment</option>
+                      </select>
+                    </label>
+                    <label className="toggle-row">
+                      <input type="checkbox" checked={draft.pdtRestricted} onChange={(event) => set("pdtRestricted", event.target.checked)} />
+                      <span><strong>Active DTBP call restriction</strong><small>Use 2× rather than 4× maintenance excess.</small></span>
+                    </label>
+                  </div>
+                )}
+              </div>
+
+              <div className="settings-section">
+                <div className="settings-section-title">
+                  <span>03</span>
+                  <div>
+                    <h3>Broker balances</h3>
+                    <p>Broker-reported values produce a better reconciliation than an inferred balance.</p>
+                  </div>
+                </div>
+                <div className="settings-grid">
+                  <MoneyField label="Start-of-day equity" value={draft.startOfDayEquity} onChange={(value) => set("startOfDayEquity", value)} />
+                  <MoneyField label="Maintenance requirement" value={draft.startOfDayMaintenance} onChange={(value) => set("startOfDayMaintenance", value)} />
+                  <MoneyField label="Margin buying power" value={draft.brokerMarginBuyingPower} onChange={(value) => set("brokerMarginBuyingPower", value)} />
+                  <MoneyField label="Day-trade buying power" value={draft.brokerDtbp} onChange={(value) => set("brokerDtbp", value)} />
+                  <MoneyField label="Settled cash" value={draft.settledCash} onChange={(value) => set("settledCash", value)} />
+                  <MoneyField label="Unsettled cash" value={draft.unsettledCash} onChange={(value) => set("unsettledCash", value)} />
+                </div>
+              </div>
+
+              <div className="settings-section">
+                <div className="settings-section-title">
+                  <span>04</span>
+                  <div>
+                    <h3>Margin assumptions</h3>
+                    <p>House rules can be higher. Override a security’s requirement on the trade when needed.</p>
+                  </div>
+                </div>
+                <div className="settings-grid four">
+                  <PercentField label="Long maintenance" value={draft.longMaintenancePct} onChange={(value) => set("longMaintenancePct", value)} />
+                  <PercentField label="Short maintenance" value={draft.shortMaintenancePct} onChange={(value) => set("shortMaintenancePct", value)} />
+                  <PercentField label="Initial margin" value={draft.initialMarginPct} onChange={(value) => set("initialMarginPct", value)} />
+                  <PercentField label="House buffer" value={draft.houseBufferPct} onChange={(value) => set("houseBufferPct", value)} />
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="settings-section">
+              <div className="settings-section-title">
+                <span>02</span>
+                <div>
+                  <h3>Cash balances</h3>
+                  <p>Use balances immediately before the first execution in this ledger.</p>
+                </div>
+              </div>
+              <div className="settings-grid">
+                <MoneyField label="Settled cash" value={draft.settledCash} onChange={(value) => set("settledCash", value)} />
+                <MoneyField label="Unsettled sale proceeds" value={draft.unsettledCash} onChange={(value) => set("unsettledCash", value)} />
+                <label className="toggle-row wide">
+                  <input type="checkbox" checked={draft.cashRestricted} onChange={(event) => set("cashRestricted", event.target.checked)} />
+                  <span><strong>Cash-up-front restriction active</strong><small>Purchases may use settled cash only, such as during a 90-day restriction.</small></span>
+                </label>
+              </div>
+              <div className="info-callout">
+                <Info />
+                <p>Most U.S. equities and options settle T+1. The calculator skips weekends and standard exchange holidays; add exceptional closures as needed.</p>
+              </div>
+            </div>
+          )}
         </div>
-      </div>
+
+        <footer className="sheet-footer">
+          <button className="button ghost" type="button" onClick={onClose}>Cancel</button>
+          <button className="button primary" type="button" onClick={() => { onSave(draft); onClose(); }}>Save snapshot</button>
+        </footer>
+      </section>
     </div>
   );
-};
+}
+
+function MoneyField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <div className="money-input">
+        <b>$</b>
+        <input type="number" min="0" step="0.01" value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      </div>
+    </label>
+  );
+}
+
+function PercentField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <div className="percent-input">
+        <input type="number" min="0" step="0.1" value={value * 100} onChange={(event) => onChange(Number(event.target.value) / 100)} />
+        <b>%</b>
+      </div>
+    </label>
+  );
+}
