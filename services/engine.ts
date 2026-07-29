@@ -13,6 +13,7 @@ import {
   Trade,
   TradeAnalysis,
 } from "../types";
+import { resolveSymbolMargin } from "../data/prototypeMarginCatalog";
 
 const EPSILON = 0.000_001;
 
@@ -23,6 +24,8 @@ interface PositionLot {
   unsettledFunding: Array<{ amount: number; settlesOn: string }>;
   unfundedAmount: number;
   openedAt: string;
+  maintenanceRate: number;
+  initialRate: number;
 }
 
 interface InternalPosition {
@@ -30,7 +33,6 @@ interface InternalPosition {
   instrument: InstrumentType;
   multiplier: number;
   leverageFactor: number;
-  marginRequirementPct?: number;
   lots: PositionLot[];
   shortLots: PositionLot[];
   markPrice: number;
@@ -124,9 +126,23 @@ const maintenanceRate = (trade: Trade, settings: AccountSettings, side: Side = t
   }
   if (trade.instrument === InstrumentType.OPTION) return 1;
   const short = side === Side.SELL_SHORT || side === Side.BUY_TO_COVER;
-  const base = short ? settings.shortMaintenancePct : settings.longMaintenancePct;
+  const symbolRule = resolveSymbolMargin(trade.symbol, settings);
+  const base = short ? symbolRule.shortMaintenancePct : symbolRule.longMaintenancePct;
   if (trade.instrument === InstrumentType.LEVERAGED_ETP) {
     return short ? base * Math.max(1, trade.leverageFactor) : Math.min(1, base * Math.max(1, trade.leverageFactor));
+  }
+  return base;
+};
+
+const initialMarginRate = (trade: Trade, settings: AccountSettings) => {
+  if (trade.marginRequirementPct && trade.marginRequirementPct > 0) {
+    return trade.marginRequirementPct;
+  }
+  if (trade.instrument === InstrumentType.OPTION) return 1;
+  const symbolRule = resolveSymbolMargin(trade.symbol, settings);
+  const base = symbolRule.initialMarginPct;
+  if (trade.instrument === InstrumentType.LEVERAGED_ETP) {
+    return Math.min(1, base * Math.max(1, trade.leverageFactor));
   }
   return base;
 };
@@ -215,7 +231,6 @@ export const calculateAccount = (
       instrument: trade.instrument,
       multiplier: trade.instrument === InstrumentType.OPTION ? trade.contractMultiplier || 100 : 1,
       leverageFactor: trade.leverageFactor || 1,
-      marginRequirementPct: trade.marginRequirementPct,
       lots: [],
       shortLots: [],
       markPrice: trade.price,
@@ -227,23 +242,14 @@ export const calculateAccount = (
   const calculateTradeMaintenance = () => {
     let total = 0;
     positions.forEach((position) => {
-      const longQty = position.lots.reduce((sum, lot) => sum + lot.quantity, 0);
-      const shortQty = position.shortLots.reduce((sum, lot) => sum + lot.quantity, 0);
-      const baseTrade: Trade = {
-        id: "rate",
-        executedAt: asOf,
-        symbol: position.symbol,
-        instrument: position.instrument,
-        side: longQty >= shortQty ? Side.BUY : Side.SELL_SHORT,
-        quantity: 0,
-        price: position.markPrice,
-        fees: 0,
-        contractMultiplier: position.multiplier,
-        leverageFactor: position.leverageFactor,
-        marginRequirementPct: position.marginRequirementPct,
-      };
-      total += longQty * position.markPrice * position.multiplier * maintenanceRate(baseTrade, settings, Side.BUY);
-      total += shortQty * position.markPrice * position.multiplier * maintenanceRate(baseTrade, settings, Side.SELL_SHORT);
+      total += position.lots.reduce(
+        (sum, lot) => sum + lot.quantity * position.markPrice * position.multiplier * lot.maintenanceRate,
+        0,
+      );
+      total += position.shortLots.reduce(
+        (sum, lot) => sum + lot.quantity * position.markPrice * position.multiplier * lot.maintenanceRate,
+        0,
+      );
     });
     return total;
   };
@@ -251,24 +257,14 @@ export const calculateAccount = (
   const currentIntradayExposure = () => {
     let exposure = 0;
     positions.forEach((position) => {
-      const longCost = position.lots.reduce((sum, lot) => sum + lot.remainingCost, 0);
-      const shortCost = position.shortLots.reduce((sum, lot) => sum + lot.remainingCost, 0);
-      const rateTrade: Trade = {
-        id: "exposure",
-        executedAt: asOf,
-        symbol: position.symbol,
-        instrument: position.instrument,
-        side: Side.BUY,
-        quantity: 0,
-        price: position.markPrice,
-        fees: 0,
-        contractMultiplier: position.multiplier,
-        leverageFactor: position.leverageFactor,
-        marginRequirementPct: position.marginRequirementPct,
-      };
-      const longFactor = maintenanceRate(rateTrade, settings, Side.BUY) / Math.max(settings.longMaintenancePct, EPSILON);
-      const shortFactor = maintenanceRate(rateTrade, settings, Side.SELL_SHORT) / Math.max(settings.longMaintenancePct, EPSILON);
-      exposure += longCost * longFactor + shortCost * shortFactor;
+      exposure += position.lots.reduce(
+        (sum, lot) => sum + lot.remainingCost * lot.maintenanceRate / Math.max(settings.longMaintenancePct, EPSILON),
+        0,
+      );
+      exposure += position.shortLots.reduce(
+        (sum, lot) => sum + lot.remainingCost * lot.maintenanceRate / Math.max(settings.longMaintenancePct, EPSILON),
+        0,
+      );
     });
     return exposure;
   };
@@ -278,6 +274,8 @@ export const calculateAccount = (
     const settlementDate = settlementDateFor(trade, settings);
     const notional = tradeNotional(trade);
     const position = getPosition(trade);
+    const resolvedMaintenanceRate = maintenanceRate(trade, settings);
+    const resolvedInitialRate = initialMarginRate(trade, settings);
     position.markPrice = trade.price;
     settleThrough(tradeDay);
     fees += trade.fees || 0;
@@ -321,6 +319,8 @@ export const calculateAccount = (
           unsettledFunding: funding,
           unfundedAmount,
           openedAt: trade.executedAt,
+          maintenanceRate: resolvedMaintenanceRate,
+          initialRate: resolvedInitialRate,
         });
       } else {
         position.lots.push({
@@ -330,6 +330,8 @@ export const calculateAccount = (
           unsettledFunding: [],
           unfundedAmount: 0,
           openedAt: trade.executedAt,
+          maintenanceRate: resolvedMaintenanceRate,
+          initialRate: resolvedInitialRate,
         });
       }
     };
@@ -339,6 +341,7 @@ export const calculateAccount = (
       let proceedsForCash = 0;
       let riskUnsettled = 0;
       let riskUnfunded = 0;
+      let releasedInitialMargin = 0;
 
       while (remaining > EPSILON && lots.length > 0) {
         const lot = lots[0];
@@ -346,6 +349,7 @@ export const calculateAccount = (
         const ratio = closedQty / lot.quantity;
         const allocatedCost = lot.remainingCost * ratio;
         const exitValue = closedQty * trade.price * position.multiplier;
+        releasedInitialMargin += closedQty * lot.price * position.multiplier * lot.initialRate;
         realizedPnl += isLong ? exitValue - allocatedCost : allocatedCost - exitValue;
         proceedsForCash += isLong ? exitValue : 0;
 
@@ -403,11 +407,13 @@ export const calculateAccount = (
         });
       }
 
-      return remaining;
+      return { remaining, releasedInitialMargin };
     };
 
     if (trade.side === Side.BUY) {
-      const remainingAfterCover = closeLots(position.shortLots, trade.quantity, false);
+      const covered = closeLots(position.shortLots, trade.quantity, false);
+      const remainingAfterCover = covered.remaining;
+      marginBuyingPowerConsumed = Math.max(0, marginBuyingPowerConsumed - covered.releasedInitialMargin);
       if (remainingAfterCover > EPSILON) {
         addLongLot(remainingAfterCover, remainingAfterCover * trade.price * position.multiplier);
         opened.add(`${position.symbol}::long`);
@@ -415,9 +421,11 @@ export const calculateAccount = (
       } else {
         closed.add(`${position.symbol}::short`);
       }
-      marginBuyingPowerConsumed += Math.max(0, remainingAfterCover) * trade.price * position.multiplier * settings.initialMarginPct;
+      marginBuyingPowerConsumed += Math.max(0, remainingAfterCover) * trade.price * position.multiplier * resolvedInitialRate;
     } else if (trade.side === Side.SELL) {
-      const remainingAfterSale = closeLots(position.lots, trade.quantity, true);
+      const sold = closeLots(position.lots, trade.quantity, true);
+      const remainingAfterSale = sold.remaining;
+      marginBuyingPowerConsumed = Math.max(0, marginBuyingPowerConsumed - sold.releasedInitialMargin);
       closed.add(`${position.symbol}::long`);
       if (remainingAfterSale > EPSILON) {
         analysisRisk = "danger";
@@ -430,7 +438,6 @@ export const calculateAccount = (
           tradeId: trade.id,
         });
       }
-      marginBuyingPowerConsumed = Math.max(0, marginBuyingPowerConsumed - notional * settings.initialMarginPct);
     } else if (trade.side === Side.SELL_SHORT) {
       position.shortLots.push({
         quantity: trade.quantity,
@@ -439,12 +446,16 @@ export const calculateAccount = (
         unsettledFunding: [],
         unfundedAmount: 0,
         openedAt: trade.executedAt,
+        maintenanceRate: maintenanceRate(trade, settings, Side.SELL_SHORT),
+        initialRate: resolvedInitialRate,
       });
       opened.add(`${position.symbol}::short`);
       aggregateDtbpUse += notional;
-      marginBuyingPowerConsumed += notional * settings.initialMarginPct;
+      marginBuyingPowerConsumed += notional * resolvedInitialRate;
     } else if (trade.side === Side.BUY_TO_COVER) {
-      const remainingAfterCover = closeLots(position.shortLots, trade.quantity, false);
+      const covered = closeLots(position.shortLots, trade.quantity, false);
+      const remainingAfterCover = covered.remaining;
+      marginBuyingPowerConsumed = Math.max(0, marginBuyingPowerConsumed - covered.releasedInitialMargin);
       closed.add(`${position.symbol}::short`);
       if (remainingAfterCover > EPSILON) {
         analysisRisk = "danger";
@@ -457,7 +468,6 @@ export const calculateAccount = (
           tradeId: trade.id,
         });
       }
-      marginBuyingPowerConsumed = Math.max(0, marginBuyingPowerConsumed - notional * settings.initialMarginPct);
     }
 
     if (unsettledFundsUsed > EPSILON && analysisRisk === "info") {
@@ -530,19 +540,10 @@ export const calculateAccount = (
     const marketValue = absoluteQty * position.markPrice * position.multiplier;
     const pnl = quantity > 0 ? marketValue - totalCost : totalCost - marketValue;
     unrealizedPnl += pnl;
-    const representative: Trade = {
-      id: "position-rate",
-      executedAt: asOf,
-      symbol: position.symbol,
-      instrument: position.instrument,
-      side: quantity > 0 ? Side.BUY : Side.SELL_SHORT,
-      quantity: absoluteQty,
-      price: position.markPrice,
-      fees: 0,
-      contractMultiplier: position.multiplier,
-      leverageFactor: position.leverageFactor,
-      marginRequirementPct: position.marginRequirementPct,
-    };
+    const maintenanceRequirement = activeLots.reduce(
+      (sum, lot) => sum + lot.quantity * position.markPrice * position.multiplier * lot.maintenanceRate,
+      0,
+    );
     outputPositions.push({
       symbol: position.symbol,
       instrument: position.instrument,
@@ -550,7 +551,7 @@ export const calculateAccount = (
       averagePrice: roundMoney(averagePrice),
       markPrice: position.markPrice,
       marketValue: roundMoney(marketValue),
-      maintenanceRequirement: roundMoney(marketValue * maintenanceRate(representative, settings)),
+      maintenanceRequirement: roundMoney(maintenanceRequirement),
       unrealizedPnl: roundMoney(pnl),
     });
   });

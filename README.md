@@ -5,6 +5,7 @@ A local-first trade clearance ledger for:
 - legacy pattern-day-trader / day-trading buying-power tracking;
 - FINRA's 2026 intraday-margin framework;
 - margin and maintenance estimates;
+- a 504-symbol prototype margin catalog with broker-specific overrides;
 - T+1 cash-settlement tracking;
 - good-faith, freeriding, and unfunded-purchase warnings;
 - optional, private Supabase sync.
@@ -26,6 +27,28 @@ Run the calculation tests with:
 npm test
 ```
 
+Type-check and build the production bundle with:
+
+```bash
+npm run typecheck
+npm run build
+```
+
+## Symbol margin rules
+
+The app includes the 503 equity symbols in State Street's 2026-07-28 SPY
+holdings file plus MSTR. Catalog membership is broad, but the included rates are
+prototype assumptions rather than a live broker feed:
+
+- account defaults apply to ordinary catalog symbols;
+- MSTR and TSLA demonstrate higher prototype house-maintenance rates;
+- saved symbol overrides replace initial, long-maintenance, and
+  short-maintenance rates;
+- the optional override on an individual trade has highest precedence.
+
+Always replace the assumptions with the rates displayed by the actual brokerage.
+Broker house requirements can change without notice and may vary by account.
+
 ## Optional Supabase sync
 
 The app works without an account and saves its state in IndexedDB on the current device.
@@ -37,6 +60,8 @@ The app works without an account and saves its state in IndexedDB on the current
 5. Restart the development server.
 
 The schema enables row-level security and limits each signed-in user to their own atomic account state. No credentials are hardcoded in the source.
+Symbol overrides are part of that atomic JSON state, so no schema migration is
+needed for the catalog.
 
 ## Calculation boundaries
 

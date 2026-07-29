@@ -1,12 +1,14 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ArrowRight, Plus, ScanSearch } from "lucide-react";
 import { formatMoney } from "../services/engine";
-import { InstrumentType, Side, Trade, TradeAnalysis } from "../types";
+import { resolveSymbolMargin } from "../data/prototypeMarginCatalog";
+import { AccountSettings, InstrumentType, Side, Trade, TradeAnalysis } from "../types";
 
 interface Props {
   onAddTrade: (trade: Trade) => void;
   onPreview: (trade: Trade | null) => void;
   previewAnalysis?: TradeAnalysis;
+  settings: AccountSettings;
 }
 
 const localDateTime = () => {
@@ -28,9 +30,14 @@ const blankTrade = (): Omit<Trade, "id"> => ({
   notes: "",
 });
 
-export function TradeForm({ onAddTrade, onPreview, previewAnalysis }: Props) {
+export function TradeForm({ onAddTrade, onPreview, previewAnalysis, settings }: Props) {
   const [trade, setTrade] = useState(blankTrade);
   const [expanded, setExpanded] = useState(false);
+  const symbolMargin = resolveSymbolMargin(trade.symbol, settings);
+  const effectiveMaintenance = trade.marginRequirementPct
+    ?? (trade.side === Side.SELL_SHORT || trade.side === Side.BUY_TO_COVER
+      ? symbolMargin.shortMaintenancePct
+      : symbolMargin.longMaintenancePct);
 
   const preview = useMemo<Trade | null>(() => {
     if (!trade.symbol.trim() || trade.quantity <= 0 || trade.price <= 0) return null;
@@ -207,6 +214,31 @@ export function TradeForm({ onAddTrade, onPreview, previewAnalysis }: Props) {
                 onChange={(event) => set("executedAt", event.target.value)}
               />
             </label>
+            {trade.instrument !== InstrumentType.OPTION && (
+              <label className="field">
+                <span>Trade margin override</span>
+                <div className="percent-input">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    placeholder={(effectiveMaintenance * 100).toFixed(1)}
+                    value={trade.marginRequirementPct ? trade.marginRequirementPct * 100 : ""}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      set("marginRequirementPct", value === "" ? undefined : Number(value) / 100);
+                    }}
+                  />
+                  <b>%</b>
+                </div>
+                <small>
+                  {trade.marginRequirementPct
+                    ? "Execution override wins over the symbol catalog."
+                    : `${symbolMargin.inPrototypeCatalog ? "Catalog" : "Account default"}: ${(effectiveMaintenance * 100).toFixed(1)}%`}
+                </small>
+              </label>
+            )}
             <label className="field notes-field">
               <span>Notes</span>
               <input

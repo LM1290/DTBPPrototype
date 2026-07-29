@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { addBusinessDays, calculateAccount, settlementDateFor } from "./engine";
 import {
+  PROTOTYPE_MARGIN_SYMBOLS,
+  resolveSymbolMargin,
+} from "../data/prototypeMarginCatalog";
+import {
   AccountSettings,
   AccountType,
   DEFAULT_SETTINGS,
@@ -177,5 +181,50 @@ describe("new intraday margin standard", () => {
     expect(result.maintenanceRequirement).toBe(12_500);
     expect(result.highestIntradayDeficit).toBe(2_500);
     expect(result.alerts.some((alert) => alert.title === "Intraday margin deficit")).toBe(true);
+  });
+});
+
+describe("symbol margin catalog", () => {
+  test("ships a broad prototype universe with the requested examples", () => {
+    expect(PROTOTYPE_MARGIN_SYMBOLS.length).toBeGreaterThanOrEqual(500);
+    expect(new Set(PROTOTYPE_MARGIN_SYMBOLS).size).toBe(PROTOTYPE_MARGIN_SYMBOLS.length);
+    expect(resolveSymbolMargin("MSTR", settings()).longMaintenancePct).toBe(0.40);
+    expect(resolveSymbolMargin("TSLA", settings()).longMaintenancePct).toBe(0.30);
+  });
+
+  test("uses a saved symbol override in maintenance and initial buying power", () => {
+    const result = calculateAccount(
+      settings({
+        brokerMarginBuyingPower: 60_000,
+        symbolMarginOverrides: {
+          AAPL: {
+            initialMarginPct: 0.60,
+            longMaintenancePct: 0.45,
+            shortMaintenancePct: 0.55,
+          },
+        },
+      }),
+      [trade({ symbol: "AAPL" })],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.positions[0].maintenanceRequirement).toBe(4_500);
+    expect(result.marginBuyingPower).toBe(54_000);
+  });
+
+  test("keeps the execution override as the highest-precedence rule", () => {
+    const result = calculateAccount(
+      settings({
+        brokerMarginBuyingPower: 60_000,
+        symbolMarginOverrides: {
+          MSTR: { initialMarginPct: 0.55, longMaintenancePct: 0.45 },
+        },
+      }),
+      [trade({ symbol: "MSTR", marginRequirementPct: 0.65 })],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.positions[0].maintenanceRequirement).toBe(6_500);
+    expect(result.marginBuyingPower).toBe(53_500);
   });
 });

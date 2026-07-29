@@ -59,7 +59,11 @@ export default function App() {
         if (activeSession) {
           const remote = await cloud.load();
           if (remote && active) {
-            setSettings({ ...DEFAULT_SETTINGS, ...remote.settings });
+            setSettings({
+              ...DEFAULT_SETTINGS,
+              ...remote.settings,
+              symbolMarginOverrides: remote.settings.symbolMarginOverrides ?? {},
+            });
             setTrades(remote.trades ?? []);
             setCloudStatus("Cloud workspace loaded");
           }
@@ -184,6 +188,7 @@ export default function App() {
               onAddTrade={addTrade}
               onPreview={handlePreview}
               previewAnalysis={previewResult.analyses.preview}
+              settings={settings}
             />
             <Dashboard result={result} settings={settings} trades={trades} onDeleteTrade={deleteTrade} />
           </>
@@ -209,7 +214,11 @@ export default function App() {
         onLoad={async () => {
           const remote = await cloud.load();
           if (remote) {
-            setSettings({ ...DEFAULT_SETTINGS, ...remote.settings });
+            setSettings({
+              ...DEFAULT_SETTINGS,
+              ...remote.settings,
+              symbolMarginOverrides: remote.settings.symbolMarginOverrides ?? {},
+            });
             setTrades(remote.trades ?? []);
             setCloudStatus("Cloud workspace loaded");
           }

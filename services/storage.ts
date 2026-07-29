@@ -25,6 +25,7 @@ const openDatabase = () =>
 const mergeSettings = (settings?: Partial<AccountSettings>): AccountSettings => ({
   ...DEFAULT_SETTINGS,
   ...settings,
+  symbolMarginOverrides: settings?.symbolMarginOverrides ?? {},
   settlementHolidays: settings?.settlementHolidays ?? [],
 });
 

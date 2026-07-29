@@ -44,6 +44,13 @@ export interface Trade {
   notes?: string;
 }
 
+export interface SymbolMarginOverride {
+  initialMarginPct?: number;
+  longMaintenancePct?: number;
+  shortMaintenancePct?: number;
+  notes?: string;
+}
+
 export interface AccountSettings {
   accountName: string;
   brokerName: string;
@@ -63,6 +70,7 @@ export interface AccountSettings {
   shortMaintenancePct: number;
   initialMarginPct: number;
   houseBufferPct: number;
+  symbolMarginOverrides: Record<string, SymbolMarginOverride>;
   settlementHolidays: string[];
 }
 
@@ -162,6 +170,7 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   shortMaintenancePct: 0.30,
   initialMarginPct: 0.50,
   houseBufferPct: 0,
+  symbolMarginOverrides: {},
   settlementHolidays: [],
 };
 

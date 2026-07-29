@@ -1,5 +1,10 @@
-import { useEffect, useState } from "react";
-import { Info, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Info, RotateCcw, Search, X } from "lucide-react";
+import {
+  PROTOTYPE_MARGIN_SYMBOLS,
+  normalizeMarginSymbol,
+  resolveSymbolMargin,
+} from "../data/prototypeMarginCatalog";
 import {
   AccountSettings,
   AccountType,
@@ -16,13 +21,49 @@ interface Props {
 
 export function SettingsPanel({ isOpen, settings, onSave, onClose }: Props) {
   const [draft, setDraft] = useState(settings);
+  const [marginSymbol, setMarginSymbol] = useState("MSTR");
 
   useEffect(() => setDraft(settings), [settings, isOpen]);
+
+  const normalizedMarginSymbol = normalizeMarginSymbol(marginSymbol);
+  const resolvedMargin = resolveSymbolMargin(normalizedMarginSymbol, draft);
+  const matchingSymbols = useMemo(
+    () => PROTOTYPE_MARGIN_SYMBOLS
+      .filter((symbol) => !normalizedMarginSymbol || symbol.includes(normalizedMarginSymbol))
+      .slice(0, 12),
+    [normalizedMarginSymbol],
+  );
 
   if (!isOpen) return null;
 
   const set = <K extends keyof AccountSettings>(key: K, value: AccountSettings[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
+
+  const updateMarginOverride = (
+    key: "initialMarginPct" | "longMaintenancePct" | "shortMaintenancePct",
+    value: number,
+  ) => {
+    if (!normalizedMarginSymbol) return;
+    setDraft((current) => ({
+      ...current,
+      symbolMarginOverrides: {
+        ...(current.symbolMarginOverrides ?? {}),
+        [normalizedMarginSymbol]: {
+          ...(current.symbolMarginOverrides?.[normalizedMarginSymbol] ?? {}),
+          [key]: value,
+        },
+      },
+    }));
+  };
+
+  const resetMarginOverride = () => {
+    if (!normalizedMarginSymbol) return;
+    setDraft((current) => {
+      const next = { ...(current.symbolMarginOverrides ?? {}) };
+      delete next[normalizedMarginSymbol];
+      return { ...current, symbolMarginOverrides: next };
+    });
+  };
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -138,6 +179,62 @@ export function SettingsPanel({ isOpen, settings, onSave, onClose }: Props) {
                   <PercentField label="Short maintenance" value={draft.shortMaintenancePct} onChange={(value) => set("shortMaintenancePct", value)} />
                   <PercentField label="Initial margin" value={draft.initialMarginPct} onChange={(value) => set("initialMarginPct", value)} />
                   <PercentField label="House buffer" value={draft.houseBufferPct} onChange={(value) => set("houseBufferPct", value)} />
+                </div>
+              </div>
+
+              <div className="settings-section">
+                <div className="settings-section-title">
+                  <span>05</span>
+                  <div>
+                    <h3>Symbol margin catalog</h3>
+                    <p>{PROTOTYPE_MARGIN_SYMBOLS.length} prototype symbols. Search any ticker and replace the assumptions with your broker’s current house requirements.</p>
+                  </div>
+                </div>
+                <div className="catalog-search">
+                  <Search size={16} aria-hidden="true" />
+                  <input
+                    aria-label="Search margin symbols"
+                    value={marginSymbol}
+                    placeholder="MSTR, TSLA, AAPL…"
+                    onChange={(event) => setMarginSymbol(event.target.value.toUpperCase())}
+                  />
+                  <span>{resolvedMargin.inPrototypeCatalog ? "Prototype catalog" : "Account default"}</span>
+                </div>
+                {normalizedMarginSymbol && (
+                  <>
+                    <div className="settings-grid four catalog-editor">
+                      <div className="catalog-symbol-card">
+                        <span>Selected symbol</span>
+                        <strong>{normalizedMarginSymbol}</strong>
+                        <small>{resolvedMargin.isCustom ? "Custom broker rule" : "Prototype assumption"}</small>
+                      </div>
+                      <PercentField label="Initial margin" value={resolvedMargin.initialMarginPct} onChange={(value) => updateMarginOverride("initialMarginPct", value)} />
+                      <PercentField label="Long maintenance" value={resolvedMargin.longMaintenancePct} onChange={(value) => updateMarginOverride("longMaintenancePct", value)} />
+                      <PercentField label="Short maintenance" value={resolvedMargin.shortMaintenancePct} onChange={(value) => updateMarginOverride("shortMaintenancePct", value)} />
+                    </div>
+                    <div className="catalog-actions">
+                      <p>{resolvedMargin.notes ?? "Baseline rates inherit from the account assumptions above."}</p>
+                      {resolvedMargin.isCustom && (
+                        <button className="text-button" type="button" onClick={resetMarginOverride}>
+                          <RotateCcw size={14} aria-hidden="true" />
+                          Restore prototype
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+                {matchingSymbols.length > 0 && normalizedMarginSymbol !== matchingSymbols[0] && (
+                  <div className="catalog-matches" aria-label="Matching prototype symbols">
+                    {matchingSymbols.map((symbol) => (
+                      <button type="button" key={symbol} onClick={() => setMarginSymbol(symbol)}>
+                        {symbol}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="info-callout">
+                  <Info />
+                  <p>These values are planning assumptions, not a live broker feed. A trade-level override still takes precedence over both catalog and account rates.</p>
                 </div>
               </div>
             </>
