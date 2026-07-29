@@ -188,6 +188,7 @@ export default function App() {
               onAddTrade={addTrade}
               onPreview={handlePreview}
               previewAnalysis={previewResult.analyses.preview}
+              previewIntradayBuyingPower={previewResult.intradayBuyingPower}
               settings={settings}
             />
             <Dashboard result={result} settings={settings} trades={trades} onDeleteTrade={deleteTrade} />
@@ -239,7 +240,7 @@ function AuditView({ result }: { result: ReturnType<typeof calculateAccount> }) 
       </div>
       <div className="audit-summary">
         <div><span>Current equity</span><strong>{formatMoney(result.currentEquity)}</strong></div>
-        <div><span>Maintenance excess</span><strong>{formatMoney(result.maintenanceExcess)}</strong></div>
+        <div><span>Maintenance excess / IML</span><strong>{formatMoney(result.maintenanceExcess)}</strong></div>
         <div><span>Realized P&amp;L</span><strong>{formatMoney(result.realizedPnl)}</strong></div>
         <div><span>Unrealized P&amp;L</span><strong>{formatMoney(result.unrealizedPnl)}</strong></div>
       </div>
@@ -278,41 +279,49 @@ function RulesView() {
           </a>
         </article>
         <article className="rule-card">
-          <span>Legacy margin</span>
-          <h2>DTBP starts with prior-day excess.</h2>
-          <p>The legacy equity-security limit is generally four times prior-day maintenance excess. A broker can use time-and-tick or aggregate commitment and can impose stricter house requirements.</p>
-          <a href="https://www.finra.org/rules-guidance/rulebooks/finra-rules/4210" target="_blank" rel="noreferrer">
-            FINRA Rule 4210 <ExternalLink />
+          <span>PDT eliminated after migration</span>
+          <h2>No trade-count designation or $25,000 floor.</h2>
+          <p>Once the broker migrates an account, the PDT designation, four-in-five counting test, $25,000 minimum and legacy four-times DTBP framework no longer apply. The general margin rules remain.</p>
+          <a href="https://www.sec.gov/files/rules/sro/finra/2026/34-105226.pdf" target="_blank" rel="noreferrer">
+            SEC approval order <ExternalLink />
           </a>
         </article>
         <article className="rule-card">
-          <span>New margin</span>
-          <h2>Intraday margin follows actual exposure.</h2>
-          <p>The new framework tracks the margin level after IML-reducing transactions and the largest negative level. The app models this from logged positions, but the broker determines the official deficit.</p>
+          <span>Current capacity</span>
+          <h2>Intraday buying power starts with positive IML.</h2>
+          <p>IML is the cash that could be withdrawn while still meeting maintenance margin—or, when negative, the cash required to restore it. Each position uses its applicable house-maintenance rate.</p>
           <a href="https://www.sec.gov/rules-regulations/self-regulatory-organization-rulemaking/sr-finra-2025-017" target="_blank" rel="noreferrer">
             SEC approval record <ExternalLink />
           </a>
         </article>
         <article className="rule-card">
-          <span>Cash settlement</span>
-          <h2>Most covered securities settle T+1.</h2>
-          <p>Sale proceeds may be available to trade before they settle. Selling a purchase funded by those proceeds too early can create a good-faith violation; never-paid purchases can create freeriding risk.</p>
-          <a href="https://www.investor.gov/introduction-investing/general-resources/news-alerts/alerts-bulletins/investor-bulletins/new-t1-settlement-cycle-what-investors-need-know-investor-bulletin" target="_blank" rel="noreferrer">
-            SEC T+1 bulletin <ExternalLink />
+          <span>Deficit lifecycle</span>
+          <h2>The largest negative IML survives a same-day recovery.</h2>
+          <p>A deficit is measured after IML-reducing transactions and must be satisfied promptly. It normally expires after 15 business days; repeated late cures can trigger a 90-day freeze after the fifth-business-day checkpoint.</p>
+          <a href="https://www.finra.org/sites/default/files/2025-12/SR-FINRA-2025-017.pdf" target="_blank" rel="noreferrer">
+            FINRA rule filing <ExternalLink />
           </a>
         </article>
         <article className="rule-card">
           <span>Margin floors</span>
-          <h2>25% long does not mean every stock is 25%.</h2>
-          <p>FINRA’s baseline is generally 25% for long margin securities and 30% or a per-share floor for shorts. Leveraged ETP requirements scale with leverage. House rates may be higher.</p>
+          <h2>The $2,000 leverage floor and house rates remain.</h2>
+          <p>Below $2,000 equity, an account may trade without leverage but cannot borrow. Baseline maintenance is generally 25% long and 30% or a per-share floor short; firms may require more.</p>
           <a href="https://www.finra.org/rules-guidance/guidance/interps-4210" target="_blank" rel="noreferrer">
             FINRA margin interpretations <ExternalLink />
+          </a>
+        </article>
+        <article className="rule-card">
+          <span>Cash settlement</span>
+          <h2>PDT removal does not remove settlement rules.</h2>
+          <p>Most covered securities settle T+1. Selling a purchase funded by unsettled proceeds too early can still create a good-faith violation; never-paid purchases can create freeriding risk.</p>
+          <a href="https://www.investor.gov/introduction-investing/general-resources/news-alerts/alerts-bulletins/investor-bulletins/new-t1-settlement-cycle-what-investors-need-know-investor-bulletin" target="_blank" rel="noreferrer">
+            SEC T+1 bulletin <ExternalLink />
           </a>
         </article>
         <article className="rule-card caution">
           <span>Hard boundary</span>
           <h2>Your broker remains the source of truth.</h2>
-          <p>The app cannot see special-margin symbols, option strategy offsets, deposits, assignments, corporate actions, starting positions, or proprietary risk controls unless you enter them. Treat discrepancies as a stop signal.</p>
+          <p>Portfolio-margin models, option offsets, deposits, assignments, corporate actions and proprietary controls require broker data. Enter broker-reported capacity for excluded account classes and treat discrepancies as a stop signal.</p>
         </article>
       </div>
     </section>

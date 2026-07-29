@@ -10,6 +10,7 @@ import {
   DEFAULT_SETTINGS,
   DtbpMethod,
   InstrumentType,
+  MarginAccountClass,
   MarginRegime,
   Side,
   Trade,
@@ -115,14 +116,18 @@ describe("cash account funding ledger", () => {
 
 describe("legacy DTBP", () => {
   test("uses a broker opening limit and peak time-and-tick commitment", () => {
-    const result = calculateAccount(settings({ brokerDtbp: 120_000 }), [trade()], "2026-07-27T20:00:00.000Z");
+    const result = calculateAccount(
+      settings({ marginRegime: MarginRegime.LEGACY_PDT, brokerDtbp: 120_000 }),
+      [trade()],
+      "2026-07-27T20:00:00.000Z",
+    );
     expect(result.dtbpUsed).toBe(10_000);
     expect(result.dtbpRemaining).toBe(110_000);
   });
 
   test("a completed round trip does not erase the day's peak commitment", () => {
     const result = calculateAccount(
-      settings({ brokerDtbp: 120_000, dtbpMethod: DtbpMethod.TIME_AND_TICK }),
+      settings({ marginRegime: MarginRegime.LEGACY_PDT, brokerDtbp: 120_000, dtbpMethod: DtbpMethod.TIME_AND_TICK }),
       [
         trade({ id: "buy" }),
         trade({ id: "sell", side: Side.SELL, executedAt: "2026-07-27T15:00:00.000Z" }),
@@ -141,12 +146,12 @@ describe("legacy DTBP", () => {
       trade({ id: "buy-2", executedAt: "2026-07-27T16:00:00.000Z" }),
     ];
     const aggregate = calculateAccount(
-      settings({ dtbpMethod: DtbpMethod.AGGREGATE, brokerDtbp: 120_000 }),
+      settings({ marginRegime: MarginRegime.LEGACY_PDT, dtbpMethod: DtbpMethod.AGGREGATE, brokerDtbp: 120_000 }),
       executions,
       "2026-07-27T20:00:00.000Z",
     );
     const peak = calculateAccount(
-      settings({ dtbpMethod: DtbpMethod.TIME_AND_TICK, brokerDtbp: 120_000 }),
+      settings({ marginRegime: MarginRegime.LEGACY_PDT, dtbpMethod: DtbpMethod.TIME_AND_TICK, brokerDtbp: 120_000 }),
       executions,
       "2026-07-27T20:00:00.000Z",
     );
@@ -156,7 +161,7 @@ describe("legacy DTBP", () => {
 
   test("leveraged ETP commitment scales with its maintenance factor", () => {
     const result = calculateAccount(
-      settings({ brokerDtbp: 120_000 }),
+      settings({ marginRegime: MarginRegime.LEGACY_PDT, brokerDtbp: 120_000 }),
       [trade({ instrument: InstrumentType.LEVERAGED_ETP, leverageFactor: 3 })],
       "2026-07-27T20:00:00.000Z",
     );
@@ -180,7 +185,193 @@ describe("new intraday margin standard", () => {
 
     expect(result.maintenanceRequirement).toBe(12_500);
     expect(result.highestIntradayDeficit).toBe(2_500);
+    expect(result.intradayBuyingPower).toBe(0);
+    expect(result.dtbpLimit).toBe(0);
+    expect(result.dtbpUsed).toBe(0);
     expect(result.alerts.some((alert) => alert.title === "Intraday margin deficit")).toBe(true);
+  });
+
+  test("eliminates PDT counting, the $25,000 floor, and legacy DTBP in the new branch", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 10_000,
+        startOfDayMaintenance: 0,
+        brokerMarginBuyingPower: 0,
+        brokerDtbp: 999_999,
+      }),
+      [
+        trade({ id: "buy" }),
+        trade({ id: "sell", side: Side.SELL, executedAt: "2026-07-27T15:00:00.000Z" }),
+      ],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.dayTrades).toBe(0);
+    expect(result.dtbpLimit).toBe(0);
+    expect(result.dtbpUsed).toBe(0);
+    expect(result.dtbpRemaining).toBe(0);
+    expect(result.intradayBuyingPower).toBe(40_000);
+    expect(result.alerts.some((alert) => alert.id === "pdt-minimum")).toBe(false);
+  });
+
+  test("keeps the largest negative IML after a later same-day recovery", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 10_000,
+        startOfDayMaintenance: 0,
+        brokerMarginBuyingPower: 0,
+      }),
+      [
+        trade({ id: "buy", quantity: 500 }),
+        trade({ id: "sell", side: Side.SELL, quantity: 500, executedAt: "2026-07-27T15:00:00.000Z" }),
+      ],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.intradayMarginLevel).toBe(10_000);
+    expect(result.intradayBuyingPower).toBe(40_000);
+    expect(result.highestIntradayDeficit).toBe(2_500);
+    expect(result.imlReducingTransactions).toBe(1);
+    expect(result.analyses.buy.imlReducing).toBe(true);
+    expect(result.analyses.sell.imlReducing).toBe(false);
+  });
+
+  test("uses house maintenance to reduce default-rate intraday capacity", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 30_000,
+        startOfDayMaintenance: 0,
+        brokerMarginBuyingPower: 0,
+        brokerIntradayBuyingPower: 0,
+      }),
+      [trade({ symbol: "MSTR" })],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.maintenanceRequirement).toBe(4_000);
+    expect(result.intradayBuyingPowerLimit).toBe(120_000);
+    expect(result.intradayBuyingPower).toBe(104_000);
+    expect(result.intradayBuyingPowerUsed).toBe(16_000);
+  });
+
+  test("honors a broker-reported opening intraday cap", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 30_000,
+        startOfDayMaintenance: 0,
+        brokerIntradayBuyingPower: 100_000,
+      }),
+      [trade()],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.intradayBuyingPowerLimit).toBe(100_000);
+    expect(result.intradayBuyingPower).toBe(90_000);
+  });
+
+  test("retains the general $2,000 leverage floor", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 1_500,
+        startOfDayMaintenance: 0,
+        settledCash: 1_200,
+        brokerIntradayBuyingPower: 10_000,
+      }),
+      [],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.leverageEligible).toBe(false);
+    expect(result.intradayBuyingPower).toBe(1_200);
+    expect(result.alerts.some((alert) => alert.id === "minimum-margin-equity")).toBe(true);
+  });
+
+  test("models the fifth-business-day restriction only for material repeated late cures", () => {
+    const restricted = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 10_000,
+        outstandingIntradayDeficit: 2_000,
+        intradayDeficitDate: "2026-07-20",
+        intradayDeficitPractice: true,
+      }),
+      [],
+      "2026-07-29T20:00:00.000Z",
+    );
+    const belowPracticeThreshold = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 10_000,
+        outstandingIntradayDeficit: 400,
+        intradayDeficitDate: "2026-07-20",
+        intradayDeficitPractice: true,
+      }),
+      [],
+      "2026-07-29T20:00:00.000Z",
+    );
+
+    expect(restricted.intradayDeficitDueDate).toBe("2026-07-27");
+    expect(restricted.deficitCountsTowardPractice).toBe(true);
+    expect(restricted.intradayRestrictionActive).toBe(true);
+    expect(restricted.intradayBuyingPower).toBe(0);
+    expect(belowPracticeThreshold.deficitCountsTowardPractice).toBe(false);
+    expect(belowPracticeThreshold.intradayRestrictionActive).toBe(false);
+  });
+
+  test("expires the deficit after 15 business days while preserving an applicable freeze", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 10_000,
+        outstandingIntradayDeficit: 2_000,
+        intradayDeficitDate: "2026-07-20",
+        intradayDeficitPractice: true,
+      }),
+      [],
+      "2026-08-11T20:00:00.000Z",
+    );
+
+    expect(result.intradayDeficitExpiresOn).toBe("2026-08-10");
+    expect(result.outstandingIntradayDeficit).toBe(0);
+    expect(result.intradayRestrictionActive).toBe(true);
+  });
+
+  test("does not derive a practice freeze for a broker-classified extraordinary deficit", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        startOfDayEquity: 10_000,
+        outstandingIntradayDeficit: 2_000,
+        intradayDeficitDate: "2026-07-20",
+        intradayDeficitPractice: true,
+        intradayDeficitExtraordinary: true,
+      }),
+      [],
+      "2026-07-29T20:00:00.000Z",
+    );
+
+    expect(result.deficitCountsTowardPractice).toBe(false);
+    expect(result.intradayRestrictionActive).toBe(false);
+  });
+
+  test("uses broker capacity for account classes excluded from standard IML", () => {
+    const result = calculateAccount(
+      settings({
+        marginRegime: MarginRegime.INTRADAY_MARGIN,
+        marginAccountClass: MarginAccountClass.PORTFOLIO_MARGIN,
+        brokerIntradayBuyingPower: 75_000,
+      }),
+      [],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.intradayRuleApplies).toBe(false);
+    expect(result.intradayBuyingPower).toBe(75_000);
   });
 });
 
@@ -226,5 +417,27 @@ describe("symbol margin catalog", () => {
 
     expect(result.positions[0].maintenanceRequirement).toBe(6_500);
     expect(result.marginBuyingPower).toBe(53_500);
+  });
+});
+
+describe("short-stock maintenance floors", () => {
+  test("applies the $5 per-share floor at $5 and above", () => {
+    const result = calculateAccount(
+      settings({ brokerIntradayBuyingPower: 0 }),
+      [trade({ side: Side.SELL_SHORT, quantity: 100, price: 10 })],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.positions[0].maintenanceRequirement).toBe(500);
+  });
+
+  test("applies the greater of 100% market value or $2.50 per share below $5", () => {
+    const result = calculateAccount(
+      settings({ brokerIntradayBuyingPower: 0 }),
+      [trade({ side: Side.SELL_SHORT, quantity: 100, price: 2 })],
+      "2026-07-27T20:00:00.000Z",
+    );
+
+    expect(result.positions[0].maintenanceRequirement).toBe(250);
   });
 });

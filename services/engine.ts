@@ -5,6 +5,7 @@ import {
   CalculationResult,
   DtbpMethod,
   InstrumentType,
+  MarginAccountClass,
   MarginRegime,
   Position,
   RiskAlert,
@@ -114,6 +115,12 @@ export const addBusinessDays = (date: string, days: number, extraHolidays: strin
   return isoDate(cursor);
 };
 
+const addCalendarDays = (date: string, days: number) => {
+  const cursor = new Date(`${date}T12:00:00Z`);
+  cursor.setUTCDate(cursor.getUTCDate() + days);
+  return isoDate(cursor);
+};
+
 export const settlementDateFor = (trade: Trade, settings: AccountSettings) =>
   addBusinessDays(dateOnly(trade.executedAt), 1, settings.settlementHolidays);
 
@@ -145,6 +152,23 @@ const initialMarginRate = (trade: Trade, settings: AccountSettings) => {
     return Math.min(1, base * Math.max(1, trade.leverageFactor));
   }
   return base;
+};
+
+const lotMaintenanceRequirement = (
+  position: InternalPosition,
+  lot: PositionLot,
+  short: boolean,
+) => {
+  const marketValue = lot.quantity * position.markPrice * position.multiplier;
+  const percentageRequirement = marketValue * lot.maintenanceRate;
+  if (!short || position.instrument === InstrumentType.OPTION) {
+    return percentageRequirement;
+  }
+
+  const lowPriced = position.markPrice < 5;
+  const regulatoryPercentageFloor = marketValue * (lowPriced ? 1 : 0.30);
+  const perShareFloor = lot.quantity * position.multiplier * (lowPriced ? 2.50 : 5);
+  return Math.max(percentageRequirement, regulatoryPercentageFloor, perShareFloor);
 };
 
 const addAlert = (alerts: RiskAlert[], alert: RiskAlert) => {
@@ -197,6 +221,8 @@ export const calculateAccount = (
   let aggregateDtbpUse = 0;
   let peakIntradayExposure = 0;
   let highestIntradayDeficit = 0;
+  let highestIntradayDeficitDate = "";
+  let imlReducingTransactions = 0;
   let currentTradeMaintenance = 0;
   let currentEquity = settings.startOfDayEquity;
   let unsettledPool: Array<{ amount: number; settlesOn: string; tradeId: string; symbol: string }> = [];
@@ -243,11 +269,11 @@ export const calculateAccount = (
     let total = 0;
     positions.forEach((position) => {
       total += position.lots.reduce(
-        (sum, lot) => sum + lot.quantity * position.markPrice * position.multiplier * lot.maintenanceRate,
+        (sum, lot) => sum + lotMaintenanceRequirement(position, lot, false),
         0,
       );
       total += position.shortLots.reduce(
-        (sum, lot) => sum + lot.quantity * position.markPrice * position.multiplier * lot.maintenanceRate,
+        (sum, lot) => sum + lotMaintenanceRequirement(position, lot, true),
         0,
       );
     });
@@ -258,11 +284,11 @@ export const calculateAccount = (
     let exposure = 0;
     positions.forEach((position) => {
       exposure += position.lots.reduce(
-        (sum, lot) => sum + lot.remainingCost * lot.maintenanceRate / Math.max(settings.longMaintenancePct, EPSILON),
+        (sum, lot) => sum + lotMaintenanceRequirement(position, lot, false) / Math.max(settings.longMaintenancePct, EPSILON),
         0,
       );
       exposure += position.shortLots.reduce(
-        (sum, lot) => sum + lot.remainingCost * lot.maintenanceRate / Math.max(settings.longMaintenancePct, EPSILON),
+        (sum, lot) => sum + lotMaintenanceRequirement(position, lot, true) / Math.max(settings.longMaintenancePct, EPSILON),
         0,
       );
     });
@@ -270,6 +296,7 @@ export const calculateAccount = (
   };
 
   trades.forEach((trade, index) => {
+    const imlBefore = currentEquity - settings.startOfDayMaintenance - currentTradeMaintenance;
     const tradeDay = dateOnly(trade.executedAt);
     const settlementDate = settlementDateFor(trade, settings);
     const notional = tradeNotional(trade);
@@ -501,8 +528,20 @@ export const calculateAccount = (
     currentTradeMaintenance = calculateTradeMaintenance();
     currentEquity = settings.startOfDayEquity + realizedPnl - fees;
     const iml = currentEquity - settings.startOfDayMaintenance - currentTradeMaintenance;
-    if (iml < 0) highestIntradayDeficit = Math.max(highestIntradayDeficit, Math.abs(iml));
+    const intradayRuleApplies =
+      settings.accountType === AccountType.MARGIN
+      && settings.marginRegime === MarginRegime.INTRADAY_MARGIN
+      && settings.marginAccountClass === MarginAccountClass.STANDARD;
+    const imlReducing = intradayRuleApplies && iml < imlBefore - EPSILON;
+    if (imlReducing) {
+      imlReducingTransactions += 1;
+      if (iml < 0 && Math.abs(iml) > highestIntradayDeficit) {
+        highestIntradayDeficit = Math.abs(iml);
+        highestIntradayDeficitDate = tradeDay;
+      }
+    }
     peakIntradayExposure = Math.max(peakIntradayExposure, currentIntradayExposure());
+    const previewRate = Math.max(resolvedMaintenanceRate + settings.houseBufferPct, EPSILON);
 
     analyses[trade.id] = {
       tradeId: trade.id,
@@ -513,6 +552,10 @@ export const calculateAccount = (
       unfundedAmount: roundMoney(unfundedAmount),
       risk: analysisRisk,
       message,
+      imlBefore: roundMoney(imlBefore),
+      imlAfter: roundMoney(iml),
+      imlReducing,
+      intradayBuyingPowerAfter: roundMoney(Math.max(0, iml) / previewRate),
     };
 
     addAudit(
@@ -541,7 +584,7 @@ export const calculateAccount = (
     const pnl = quantity > 0 ? marketValue - totalCost : totalCost - marketValue;
     unrealizedPnl += pnl;
     const maintenanceRequirement = activeLots.reduce(
-      (sum, lot) => sum + lot.quantity * position.markPrice * position.multiplier * lot.maintenanceRate,
+      (sum, lot) => sum + lotMaintenanceRequirement(position, lot, quantity < 0),
       0,
     );
     outputPositions.push({
@@ -560,23 +603,113 @@ export const calculateAccount = (
   const maintenanceRequirement = settings.startOfDayMaintenance + currentTradeMaintenance;
   const maintenanceExcess = currentEquity - maintenanceRequirement;
   const intradayMarginLevel = maintenanceExcess;
+  const isLegacyMargin =
+    settings.accountType === AccountType.MARGIN
+    && settings.marginRegime === MarginRegime.LEGACY_PDT;
+  const intradayRuleApplies =
+    settings.accountType === AccountType.MARGIN
+    && settings.marginRegime === MarginRegime.INTRADAY_MARGIN
+    && settings.marginAccountClass === MarginAccountClass.STANDARD;
   const computedLegacyLimit = Math.max(0, (settings.startOfDayEquity - settings.startOfDayMaintenance) * (settings.pdtRestricted ? 2 : 4));
-  const dtbpLimit = settings.brokerDtbp > 0 ? settings.brokerDtbp : computedLegacyLimit;
-  const dtbpUsed = settings.dtbpMethod === DtbpMethod.AGGREGATE ? aggregateDtbpUse : peakIntradayExposure;
-  const dtbpRemaining = Math.max(0, dtbpLimit - dtbpUsed);
+  const dtbpLimit = isLegacyMargin ? (settings.brokerDtbp > 0 ? settings.brokerDtbp : computedLegacyLimit) : 0;
+  const dtbpUsed = isLegacyMargin
+    ? (settings.dtbpMethod === DtbpMethod.AGGREGATE ? aggregateDtbpUse : peakIntradayExposure)
+    : 0;
+  const dtbpRemaining = isLegacyMargin ? Math.max(0, dtbpLimit - dtbpUsed) : 0;
   const estimatedMarginBp = Math.max(0, maintenanceExcess / Math.max(settings.initialMarginPct + settings.houseBufferPct, EPSILON));
   const brokerBasedMarginBp = Math.max(0, settings.brokerMarginBuyingPower - marginBuyingPowerConsumed + realizedPnl - fees);
-  const marginBuyingPower = settings.brokerMarginBuyingPower > 0 ? brokerBasedMarginBp : estimatedMarginBp;
   const pendingCash = unsettledPool.reduce((sum, item) => sum + item.amount, 0);
   const cashAvailableToTrade = Math.max(0, settledCash + (settings.cashRestricted ? 0 : pendingCash));
-  const optionBuyingPower = settings.accountType === AccountType.CASH
+  const leverageEligible = settings.accountType === AccountType.MARGIN && currentEquity >= 2_000;
+  const marginBuyingPower = leverageEligible
+    ? (settings.brokerMarginBuyingPower > 0 ? brokerBasedMarginBp : estimatedMarginBp)
+    : cashAvailableToTrade;
+  const optionBuyingPower = settings.accountType === AccountType.CASH || !leverageEligible
     ? cashAvailableToTrade
     : Math.max(0, (settings.brokerMarginBuyingPower > 0 ? settings.brokerMarginBuyingPower * settings.initialMarginPct : maintenanceExcess) - marginBuyingPowerConsumed);
 
-  const dayTrades = [...openingByDay.entries()].reduce((count, [day, opened]) => {
+  const countedLegacyDayTrades = [...openingByDay.entries()].reduce((count, [day, opened]) => {
     const closed = closingByDay.get(day) ?? new Set<string>();
     return count + [...opened].filter((key) => closed.has(key)).length;
   }, 0);
+  const dayTrades = isLegacyMargin ? countedLegacyDayTrades : 0;
+
+  const intradayBuyingPowerRate = Math.max(
+    settings.longMaintenancePct + settings.houseBufferPct,
+    EPSILON,
+  );
+  const calculatedOpeningIntradayBp = Math.max(
+    0,
+    settings.startOfDayEquity - settings.startOfDayMaintenance,
+  ) / intradayBuyingPowerRate;
+  const intradayBuyingPowerLimit = intradayRuleApplies
+    ? (settings.brokerIntradayBuyingPower > 0
+      ? settings.brokerIntradayBuyingPower
+      : calculatedOpeningIntradayBp)
+    : settings.marginRegime === MarginRegime.INTRADAY_MARGIN
+      ? Math.max(0, settings.brokerIntradayBuyingPower)
+      : 0;
+  const computedIntradayBp = Math.max(0, intradayMarginLevel) / intradayBuyingPowerRate;
+  const brokerTrackedIntradayBp = Math.max(
+    0,
+    intradayBuyingPowerLimit
+      - currentIntradayExposure()
+      + (realizedPnl - fees) / intradayBuyingPowerRate,
+  );
+
+  const configuredOutstandingDeficit = Math.max(0, settings.outstandingIntradayDeficit);
+  const currentDayDeficit = intradayRuleApplies ? highestIntradayDeficit : 0;
+  const candidateIntradayDeficit = Math.max(configuredOutstandingDeficit, currentDayDeficit);
+  const controllingDeficitDate = configuredOutstandingDeficit >= currentDayDeficit
+    ? settings.intradayDeficitDate
+    : highestIntradayDeficitDate;
+  const intradayDeficitDueDate = candidateIntradayDeficit > 0 && controllingDeficitDate
+    ? addBusinessDays(controllingDeficitDate, 5, settings.settlementHolidays)
+    : undefined;
+  const intradayDeficitExpiresOn = candidateIntradayDeficit > 0 && controllingDeficitDate
+    ? addBusinessDays(controllingDeficitDate, 15, settings.settlementHolidays)
+    : undefined;
+  const deficitStillOutstanding =
+    candidateIntradayDeficit > 0
+    && (!intradayDeficitExpiresOn || dateOnly(asOf) <= intradayDeficitExpiresOn);
+  const outstandingIntradayDeficit = deficitStillOutstanding ? candidateIntradayDeficit : 0;
+  const practiceThreshold = Math.min(Math.max(0, currentEquity) * 0.05, 1_000);
+  const deficitCountsTowardPractice =
+    candidateIntradayDeficit > practiceThreshold + EPSILON
+    && !settings.intradayDeficitExtraordinary;
+  const derivedRestrictionEndsOn =
+    intradayDeficitDueDate
+    && settings.intradayDeficitPractice
+    && deficitCountsTowardPractice
+    && dateOnly(asOf) > intradayDeficitDueDate
+      ? addCalendarDays(intradayDeficitDueDate, 90)
+      : undefined;
+  const reportedRestrictionActive =
+    Boolean(settings.intradayRestrictionUntil)
+    && dateOnly(asOf) <= settings.intradayRestrictionUntil;
+  const derivedRestrictionActive =
+    Boolean(derivedRestrictionEndsOn)
+    && dateOnly(asOf) <= (derivedRestrictionEndsOn ?? "");
+  const intradayRestrictionActive =
+    settings.marginRegime === MarginRegime.INTRADAY_MARGIN
+    && (reportedRestrictionActive || derivedRestrictionActive);
+  const intradayRestrictionEndsOn = reportedRestrictionActive
+    ? settings.intradayRestrictionUntil
+    : derivedRestrictionEndsOn;
+
+  let intradayBuyingPower = 0;
+  if (settings.marginRegime === MarginRegime.INTRADAY_MARGIN) {
+    if (intradayRuleApplies) {
+      intradayBuyingPower = settings.brokerIntradayBuyingPower > 0
+        ? Math.min(computedIntradayBp, brokerTrackedIntradayBp)
+        : computedIntradayBp;
+    } else {
+      intradayBuyingPower = Math.max(0, settings.brokerIntradayBuyingPower);
+    }
+    if (!leverageEligible) intradayBuyingPower = cashAvailableToTrade;
+    if (intradayRestrictionActive) intradayBuyingPower = 0;
+  }
+  const intradayBuyingPowerUsed = Math.max(0, intradayBuyingPowerLimit - intradayBuyingPower);
 
   if (settings.accountType === AccountType.MARGIN) {
     if (settings.marginRegime === MarginRegime.LEGACY_PDT && settings.startOfDayEquity < 25_000) {
@@ -595,12 +728,55 @@ export const calculateAccount = (
         detail: `Tracked intraday commitment exceeds the start-of-day limit by ${formatMoney(dtbpUsed - dtbpLimit)}.`,
       });
     }
-    if (settings.marginRegime === MarginRegime.INTRADAY_MARGIN && highestIntradayDeficit > 0) {
+    if (intradayRuleApplies && highestIntradayDeficit > 0) {
       addAlert(alerts, {
         id: "intraday-deficit",
         level: "danger",
         title: "Intraday margin deficit",
-        detail: `The largest tracked negative intraday margin level was ${formatMoney(highestIntradayDeficit)}. Contact your broker about cure timing.`,
+        detail: `The largest negative IML after an IML-reducing transaction was ${formatMoney(highestIntradayDeficit)}. It must be satisfied as promptly as possible${intradayDeficitDueDate ? `; the fifth-business-day checkpoint is ${intradayDeficitDueDate}` : ""}.`,
+      });
+    }
+    if (
+      intradayRuleApplies
+      && outstandingIntradayDeficit > 0
+      && configuredOutstandingDeficit > highestIntradayDeficit
+    ) {
+      addAlert(alerts, {
+        id: "outstanding-intraday-deficit",
+        level: "danger",
+        title: "Outstanding intraday margin deficit",
+        detail: `${formatMoney(outstandingIntradayDeficit)} remains outstanding${intradayDeficitDueDate ? `; the fifth-business-day checkpoint is ${intradayDeficitDueDate}` : ""}${intradayDeficitExpiresOn ? ` and the deficit expires after ${intradayDeficitExpiresOn}` : ""}. Update the snapshot when the broker marks it satisfied.`,
+      });
+    }
+    if (settings.marginRegime === MarginRegime.INTRADAY_MARGIN && !leverageEligible) {
+      addAlert(alerts, {
+        id: "minimum-margin-equity",
+        level: "watch",
+        title: "Leverage unavailable below $2,000",
+        detail: "The PDT $25,000 minimum is gone under the new regime, but the general $2,000 minimum for leveraged margin trading remains. Capacity is limited to tracked cash.",
+      });
+    }
+    if (intradayRestrictionActive) {
+      addAlert(alerts, {
+        id: "intraday-credit-freeze",
+        level: "danger",
+        title: "Intraday credit freeze active",
+        detail: `Do not create or increase a debit balance or short position${intradayRestrictionEndsOn ? ` through ${intradayRestrictionEndsOn}` : ""}. Position-closing transactions remain permitted.`,
+      });
+    }
+    if (
+      settings.marginRegime === MarginRegime.INTRADAY_MARGIN
+      && settings.marginAccountClass !== MarginAccountClass.STANDARD
+    ) {
+      addAlert(alerts, {
+        id: "broker-intraday-required",
+        level: settings.brokerIntradayBuyingPower > 0 ? "info" : "watch",
+        title: settings.brokerIntradayBuyingPower > 0
+          ? "Broker intraday model in use"
+          : "Broker intraday capacity required",
+        detail: settings.marginAccountClass === MarginAccountClass.PORTFOLIO_MARGIN
+          ? `Portfolio-margin accounts are excluded from standard IML. ${settings.startOfDayEquity < 5_000_000 ? "Below $5 million equity, the broker must apply intraday margin substantially similar to its end-of-day methodology. " : ""}${settings.brokerIntradayBuyingPower > 0 ? "The displayed capacity uses the entered broker value." : "Enter the broker-reported intraday buying power."}`
+          : `Good-faith accounts are excluded from the standard intraday-deficit computation. ${settings.brokerIntradayBuyingPower > 0 ? "The displayed capacity uses the entered broker value." : "Enter the broker-reported capacity."}`,
       });
     }
     if (maintenanceExcess < 0) {
@@ -632,6 +808,16 @@ export const calculateAccount = (
       `${formatMoney(dtbpLimit)} start-of-day limit − ${formatMoney(dtbpUsed)} ${settings.dtbpMethod === DtbpMethod.TIME_AND_TICK ? "peak commitment" : "aggregate commitment"}`,
       dtbpRemaining,
     );
+  } else if (settings.accountType === AccountType.MARGIN && settings.marginRegime === MarginRegime.INTRADAY_MARGIN) {
+    addAudit(
+      auditTrail,
+      asOf,
+      "Current intraday buying power",
+      intradayRuleApplies
+        ? `${formatMoney(Math.max(0, intradayMarginLevel))} positive IML ÷ ${(intradayBuyingPowerRate * 100).toFixed(1)}% default long requirement`
+        : "Broker-reported capacity for an account excluded from the standard IML formula",
+      intradayBuyingPower,
+    );
   }
 
   return {
@@ -648,7 +834,20 @@ export const calculateAccount = (
     maintenanceRequirement: roundMoney(maintenanceRequirement),
     maintenanceExcess: roundMoney(maintenanceExcess),
     intradayMarginLevel: roundMoney(intradayMarginLevel),
+    intradayBuyingPower: roundMoney(intradayBuyingPower),
+    intradayBuyingPowerLimit: roundMoney(intradayBuyingPowerLimit),
+    intradayBuyingPowerUsed: roundMoney(intradayBuyingPowerUsed),
+    intradayBuyingPowerRate,
     highestIntradayDeficit: roundMoney(highestIntradayDeficit),
+    outstandingIntradayDeficit: roundMoney(outstandingIntradayDeficit),
+    intradayDeficitDueDate,
+    intradayDeficitExpiresOn,
+    deficitCountsTowardPractice,
+    intradayRestrictionActive,
+    intradayRestrictionEndsOn,
+    imlReducingTransactions,
+    leverageEligible,
+    intradayRuleApplies,
     realizedPnl: roundMoney(realizedPnl),
     unrealizedPnl: roundMoney(unrealizedPnl),
     fees: roundMoney(fees),

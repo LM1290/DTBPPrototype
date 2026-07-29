@@ -8,6 +8,12 @@ export enum MarginRegime {
   INTRADAY_MARGIN = "intraday_margin",
 }
 
+export enum MarginAccountClass {
+  STANDARD = "standard",
+  PORTFOLIO_MARGIN = "portfolio_margin",
+  GOOD_FAITH = "good_faith",
+}
+
 export enum DtbpMethod {
   TIME_AND_TICK = "time_and_tick",
   AGGREGATE = "aggregate",
@@ -56,6 +62,7 @@ export interface AccountSettings {
   brokerName: string;
   accountType: AccountType;
   marginRegime: MarginRegime;
+  marginAccountClass: MarginAccountClass;
   dtbpMethod: DtbpMethod;
   snapshotDate: string;
   settledCash: number;
@@ -64,7 +71,13 @@ export interface AccountSettings {
   startOfDayMaintenance: number;
   brokerMarginBuyingPower: number;
   brokerDtbp: number;
+  brokerIntradayBuyingPower: number;
   pdtRestricted: boolean;
+  outstandingIntradayDeficit: number;
+  intradayDeficitDate: string;
+  intradayDeficitPractice: boolean;
+  intradayDeficitExtraordinary: boolean;
+  intradayRestrictionUntil: string;
   cashRestricted: boolean;
   longMaintenancePct: number;
   shortMaintenancePct: number;
@@ -112,6 +125,10 @@ export interface TradeAnalysis {
   unfundedAmount: number;
   risk: RiskLevel;
   message: string;
+  imlBefore: number;
+  imlAfter: number;
+  imlReducing: boolean;
+  intradayBuyingPowerAfter: number;
 }
 
 export interface AuditEntry {
@@ -136,7 +153,20 @@ export interface CalculationResult {
   maintenanceRequirement: number;
   maintenanceExcess: number;
   intradayMarginLevel: number;
+  intradayBuyingPower: number;
+  intradayBuyingPowerLimit: number;
+  intradayBuyingPowerUsed: number;
+  intradayBuyingPowerRate: number;
   highestIntradayDeficit: number;
+  outstandingIntradayDeficit: number;
+  intradayDeficitDueDate?: string;
+  intradayDeficitExpiresOn?: string;
+  deficitCountsTowardPractice: boolean;
+  intradayRestrictionActive: boolean;
+  intradayRestrictionEndsOn?: string;
+  imlReducingTransactions: number;
+  leverageEligible: boolean;
+  intradayRuleApplies: boolean;
   realizedPnl: number;
   unrealizedPnl: number;
   fees: number;
@@ -155,7 +185,8 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   accountName: "Primary brokerage",
   brokerName: "My broker",
   accountType: AccountType.MARGIN,
-  marginRegime: MarginRegime.LEGACY_PDT,
+  marginRegime: MarginRegime.INTRADAY_MARGIN,
+  marginAccountClass: MarginAccountClass.STANDARD,
   dtbpMethod: DtbpMethod.TIME_AND_TICK,
   snapshotDate: today,
   settledCash: 30_000,
@@ -164,7 +195,13 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   startOfDayMaintenance: 0,
   brokerMarginBuyingPower: 60_000,
   brokerDtbp: 120_000,
+  brokerIntradayBuyingPower: 0,
   pdtRestricted: false,
+  outstandingIntradayDeficit: 0,
+  intradayDeficitDate: "",
+  intradayDeficitPractice: false,
+  intradayDeficitExtraordinary: false,
+  intradayRestrictionUntil: "",
   cashRestricted: false,
   longMaintenancePct: 0.25,
   shortMaintenancePct: 0.30,
@@ -188,7 +225,17 @@ export const EMPTY_RESULT: CalculationResult = {
   maintenanceRequirement: 0,
   maintenanceExcess: 0,
   intradayMarginLevel: 0,
+  intradayBuyingPower: 0,
+  intradayBuyingPowerLimit: 0,
+  intradayBuyingPowerUsed: 0,
+  intradayBuyingPowerRate: 0,
   highestIntradayDeficit: 0,
+  outstandingIntradayDeficit: 0,
+  deficitCountsTowardPractice: false,
+  intradayRestrictionActive: false,
+  imlReducingTransactions: 0,
+  leverageEligible: false,
+  intradayRuleApplies: false,
   realizedPnl: 0,
   unrealizedPnl: 0,
   fees: 0,

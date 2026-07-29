@@ -37,19 +37,37 @@ const actionLabel: Record<Side, string> = {
 };
 
 export function Dashboard({ result, settings, trades, onDeleteTrade }: Props) {
+  const isIntradayMargin =
+    settings.accountType === AccountType.MARGIN
+    && settings.marginRegime === MarginRegime.INTRADAY_MARGIN;
   const primaryValue =
     settings.accountType === AccountType.CASH
       ? result.cashAvailableToTrade
       : settings.marginRegime === MarginRegime.LEGACY_PDT
         ? result.dtbpRemaining
-        : Math.max(0, result.intradayMarginLevel / Math.max(settings.longMaintenancePct, 0.01));
+        : result.intradayBuyingPower;
 
   const primaryLabel =
     settings.accountType === AccountType.CASH
       ? "Cash available to trade"
       : settings.marginRegime === MarginRegime.LEGACY_PDT
         ? "Estimated DTBP remaining"
-        : "Long-stock capacity at current IML";
+        : "Estimated intraday buying power";
+  const capacityLimit =
+    settings.accountType === AccountType.CASH
+      ? result.cashAvailableToTrade
+      : settings.marginRegime === MarginRegime.LEGACY_PDT
+        ? result.dtbpLimit
+        : result.intradayBuyingPowerLimit;
+  const capacityRemaining =
+    settings.accountType === AccountType.CASH
+      ? result.cashAvailableToTrade
+      : settings.marginRegime === MarginRegime.LEGACY_PDT
+        ? result.dtbpRemaining
+        : result.intradayBuyingPower;
+  const capacityPercent = capacityLimit > 0
+    ? Math.min(100, Math.max(0, (capacityRemaining / capacityLimit) * 100))
+    : 100;
 
   return (
     <>
@@ -69,19 +87,22 @@ export function Dashboard({ result, settings, trades, onDeleteTrade }: Props) {
           </div>
           <p>{primaryLabel}</p>
           <small>
+            {isIntradayMargin
+              ? `${formatMoney(result.intradayMarginLevel)} current IML · ${(result.intradayBuyingPowerRate * 100).toFixed(1)}% baseline long requirement · `
+              : ""}
             Based on {settings.brokerName} opening balances and {result.tradeCount} tracked execution
             {result.tradeCount === 1 ? "" : "s"}. Reconcile against your broker before placing an order.
           </small>
         </div>
-        <div className="capacity-ring" style={{ "--capacity": `${Math.min(100, Math.max(0, settings.accountType === AccountType.MARGIN && result.dtbpLimit > 0 ? (result.dtbpRemaining / result.dtbpLimit) * 100 : 100))}%` } as CSSProperties}>
+        <div className="capacity-ring" style={{ "--capacity": `${capacityPercent}%` } as CSSProperties}>
           <div>
             <strong>
-              {settings.accountType === AccountType.MARGIN && settings.marginRegime === MarginRegime.LEGACY_PDT
-                ? `${Math.round((result.dtbpRemaining / Math.max(result.dtbpLimit, 1)) * 100)}%`
+              {settings.accountType === AccountType.MARGIN
+                ? `${Math.round(capacityPercent)}%`
                 : result.alerts.filter((alert) => alert.level === "danger").length}
             </strong>
             <span>
-              {settings.accountType === AccountType.MARGIN && settings.marginRegime === MarginRegime.LEGACY_PDT
+              {settings.accountType === AccountType.MARGIN
                 ? "capacity left"
                 : "critical flags"}
             </span>
@@ -92,16 +113,24 @@ export function Dashboard({ result, settings, trades, onDeleteTrade }: Props) {
       <section className="metric-grid" aria-label="Account metrics">
         <MetricCard
           icon={<Gauge />}
-          label="Margin buying power"
-          value={formatMoney(result.marginBuyingPower)}
-          note={settings.brokerMarginBuyingPower > 0 ? "Broker opening BP less tracked use" : "Estimate from maintenance excess"}
+          label={settings.accountType === AccountType.CASH ? "Cash available" : "Margin buying power"}
+          value={formatMoney(settings.accountType === AccountType.CASH ? result.cashAvailableToTrade : result.marginBuyingPower)}
+          note={settings.accountType === AccountType.CASH
+            ? "Settled plus eligible pending proceeds"
+            : settings.brokerMarginBuyingPower > 0
+              ? "Broker opening BP less tracked use"
+              : "Estimate from maintenance excess"}
         />
         <MetricCard
           icon={<Landmark />}
-          label="Maintenance excess"
-          value={formatMoney(result.maintenanceExcess)}
-          note={`${formatMoney(result.maintenanceRequirement)} requirement`}
-          danger={result.maintenanceExcess < 0}
+          label={isIntradayMargin ? "Current IML" : settings.accountType === AccountType.CASH ? "Current equity" : "Maintenance excess"}
+          value={formatMoney(isIntradayMargin || settings.accountType === AccountType.MARGIN ? result.maintenanceExcess : result.currentEquity)}
+          note={isIntradayMargin
+            ? `${result.imlReducingTransactions} IML-reducing transaction${result.imlReducingTransactions === 1 ? "" : "s"}`
+            : settings.accountType === AccountType.CASH
+              ? "Tracked cash-account equity"
+              : `${formatMoney(result.maintenanceRequirement)} requirement`}
+          danger={settings.accountType === AccountType.MARGIN && result.maintenanceExcess < 0}
         />
         <MetricCard
           icon={<CircleDollarSign />}
@@ -111,14 +140,26 @@ export function Dashboard({ result, settings, trades, onDeleteTrade }: Props) {
         />
         <MetricCard
           icon={<CalendarClock />}
-          label={settings.marginRegime === MarginRegime.LEGACY_PDT ? "DTBP used" : "Largest intraday deficit"}
-          value={formatMoney(settings.marginRegime === MarginRegime.LEGACY_PDT ? result.dtbpUsed : result.highestIntradayDeficit)}
+          label={settings.accountType === AccountType.CASH
+            ? "Pending settlement"
+            : settings.marginRegime === MarginRegime.LEGACY_PDT
+              ? "DTBP used"
+              : "Largest intraday deficit"}
+          value={formatMoney(settings.accountType === AccountType.CASH
+            ? result.unsettledCash
+            : settings.marginRegime === MarginRegime.LEGACY_PDT
+              ? result.dtbpUsed
+              : result.highestIntradayDeficit)}
           note={
-            settings.marginRegime === MarginRegime.LEGACY_PDT
+            settings.accountType === AccountType.CASH
+              ? "Sale proceeds awaiting T+1"
+              : settings.marginRegime === MarginRegime.LEGACY_PDT
               ? `${formatMoney(result.dtbpLimit)} opening limit`
-              : "Across IML-reducing trades"
+              : result.outstandingIntradayDeficit > 0
+                ? `${formatMoney(result.outstandingIntradayDeficit)} outstanding${result.intradayDeficitDueDate ? ` · checkpoint ${result.intradayDeficitDueDate}` : ""}`
+                : "Largest negative IML after reducing transactions"
           }
-          danger={settings.marginRegime === MarginRegime.INTRADAY_MARGIN && result.highestIntradayDeficit > 0}
+          danger={isIntradayMargin && result.highestIntradayDeficit > 0}
         />
       </section>
 
@@ -245,7 +286,13 @@ export function Dashboard({ result, settings, trades, onDeleteTrade }: Props) {
             <h2>Trade ledger</h2>
           </div>
           <div className="ledger-totals">
-            <span>{result.dayTrades} day trade{result.dayTrades === 1 ? "" : "s"}</span>
+            <span>
+              {settings.accountType === AccountType.MARGIN && settings.marginRegime === MarginRegime.LEGACY_PDT
+                ? `${result.dayTrades} day trade${result.dayTrades === 1 ? "" : "s"}`
+                : isIntradayMargin
+                  ? `${result.imlReducingTransactions} IML-reducing`
+                  : `${result.tradeCount} execution${result.tradeCount === 1 ? "" : "s"}`}
+            </span>
             <span>{formatMoney(result.fees)} fees</span>
           </div>
         </div>

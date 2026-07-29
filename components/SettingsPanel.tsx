@@ -9,6 +9,7 @@ import {
   AccountSettings,
   AccountType,
   DtbpMethod,
+  MarginAccountClass,
   MarginRegime,
 } from "../types";
 
@@ -127,8 +128,8 @@ export function SettingsPanel({ isOpen, settings, onSave, onClose }: Props) {
                     <span>Prior-day maintenance excess × 4, with the $25,000 PDT minimum.</span>
                   </button>
                   <button className={`choice-card ${draft.marginRegime === MarginRegime.INTRADAY_MARGIN ? "selected" : ""}`} type="button" onClick={() => set("marginRegime", MarginRegime.INTRADAY_MARGIN)}>
-                    <strong>New intraday margin</strong>
-                    <span>Tracks intraday margin level and the largest negative IML.</span>
+                    <strong>Rule 4210 intraday margin</strong>
+                    <span>No PDT designation, trade count, $25,000 minimum, or legacy 4× DTBP calculation.</span>
                   </button>
                 </div>
                 {draft.marginRegime === MarginRegime.LEGACY_PDT && (
@@ -146,6 +147,29 @@ export function SettingsPanel({ isOpen, settings, onSave, onClose }: Props) {
                     </label>
                   </div>
                 )}
+                {draft.marginRegime === MarginRegime.INTRADAY_MARGIN && (
+                  <div className="inline-fields">
+                    <label className="field">
+                      <span>Margin account class</span>
+                      <select
+                        value={draft.marginAccountClass}
+                        onChange={(event) => set("marginAccountClass", event.target.value as MarginAccountClass)}
+                      >
+                        <option value={MarginAccountClass.STANDARD}>Standard strategy-based margin</option>
+                        <option value={MarginAccountClass.PORTFOLIO_MARGIN}>Portfolio margin</option>
+                        <option value={MarginAccountClass.GOOD_FAITH}>Good-faith account</option>
+                      </select>
+                    </label>
+                    <div className="config-safe">
+                      <Info size={15} />
+                      <span>
+                        {draft.marginAccountClass === MarginAccountClass.STANDARD
+                          ? "Standard accounts use the IML calculation."
+                          : "This account is excluded from the standard IML formula; use broker-reported intraday capacity."}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="settings-section">
@@ -160,15 +184,54 @@ export function SettingsPanel({ isOpen, settings, onSave, onClose }: Props) {
                   <MoneyField label="Start-of-day equity" value={draft.startOfDayEquity} onChange={(value) => set("startOfDayEquity", value)} />
                   <MoneyField label="Maintenance requirement" value={draft.startOfDayMaintenance} onChange={(value) => set("startOfDayMaintenance", value)} />
                   <MoneyField label="Margin buying power" value={draft.brokerMarginBuyingPower} onChange={(value) => set("brokerMarginBuyingPower", value)} />
-                  <MoneyField label="Day-trade buying power" value={draft.brokerDtbp} onChange={(value) => set("brokerDtbp", value)} />
+                  {draft.marginRegime === MarginRegime.LEGACY_PDT ? (
+                    <MoneyField label="Day-trade buying power" value={draft.brokerDtbp} onChange={(value) => set("brokerDtbp", value)} />
+                  ) : (
+                    <MoneyField label="Opening intraday buying power (optional)" value={draft.brokerIntradayBuyingPower} onChange={(value) => set("brokerIntradayBuyingPower", value)} />
+                  )}
                   <MoneyField label="Settled cash" value={draft.settledCash} onChange={(value) => set("settledCash", value)} />
                   <MoneyField label="Unsettled cash" value={draft.unsettledCash} onChange={(value) => set("unsettledCash", value)} />
                 </div>
               </div>
 
+              {draft.marginRegime === MarginRegime.INTRADAY_MARGIN && (
+                <div className="settings-section">
+                  <div className="settings-section-title">
+                    <span>04</span>
+                    <div>
+                      <h3>Intraday deficit and credit status</h3>
+                      <p>Copy any outstanding deficit or restriction from the broker. A deficit must be satisfied promptly and normally remains outstanding for up to 15 business days.</p>
+                    </div>
+                  </div>
+                  <div className="settings-grid">
+                    <MoneyField label="Outstanding intraday deficit" value={draft.outstandingIntradayDeficit} onChange={(value) => set("outstandingIntradayDeficit", value)} />
+                    <label className="field">
+                      <span>Deficit incurred</span>
+                      <input type="date" value={draft.intradayDeficitDate} onChange={(event) => set("intradayDeficitDate", event.target.value)} />
+                    </label>
+                    <label className="field">
+                      <span>Broker restriction ends</span>
+                      <input type="date" value={draft.intradayRestrictionUntil} onChange={(event) => set("intradayRestrictionUntil", event.target.value)} />
+                    </label>
+                    <label className="toggle-row">
+                      <input type="checkbox" checked={draft.intradayDeficitPractice} onChange={(event) => set("intradayDeficitPractice", event.target.checked)} />
+                      <span><strong>Repeated late cures / practice flag</strong><small>Needed to evaluate the fifth-business-day 90-day credit freeze.</small></span>
+                    </label>
+                    <label className="toggle-row wide">
+                      <input type="checkbox" checked={draft.intradayDeficitExtraordinary} onChange={(event) => set("intradayDeficitExtraordinary", event.target.checked)} />
+                      <span><strong>Broker classified the deficit as extraordinary</strong><small>Extraordinary deficits do not establish a practice of failing to cure promptly.</small></span>
+                    </label>
+                  </div>
+                  <div className="info-callout">
+                    <Info />
+                    <p>Deficits no greater than the lesser of 5% of account equity or $1,000 do not establish a late-cure practice, but they still require prompt satisfaction.</p>
+                  </div>
+                </div>
+              )}
+
               <div className="settings-section">
                 <div className="settings-section-title">
-                  <span>04</span>
+                  <span>{draft.marginRegime === MarginRegime.INTRADAY_MARGIN ? "05" : "04"}</span>
                   <div>
                     <h3>Margin assumptions</h3>
                     <p>House rules can be higher. Override a security’s requirement on the trade when needed.</p>
@@ -184,7 +247,7 @@ export function SettingsPanel({ isOpen, settings, onSave, onClose }: Props) {
 
               <div className="settings-section">
                 <div className="settings-section-title">
-                  <span>05</span>
+                  <span>{draft.marginRegime === MarginRegime.INTRADAY_MARGIN ? "06" : "05"}</span>
                   <div>
                     <h3>Symbol margin catalog</h3>
                     <p>{PROTOTYPE_MARGIN_SYMBOLS.length} prototype symbols. Search any ticker and replace the assumptions with your broker’s current house requirements.</p>

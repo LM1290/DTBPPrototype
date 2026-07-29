@@ -3,7 +3,8 @@
 A local-first trade clearance ledger for:
 
 - legacy pattern-day-trader / day-trading buying-power tracking;
-- FINRA's 2026 intraday-margin framework;
+- FINRA's 2026 intraday-margin framework and transition from legacy PDT;
+- headline intraday buying power derived from current IML and house maintenance;
 - margin and maintenance estimates;
 - a 504-symbol prototype margin catalog with broker-specific overrides;
 - T+1 cash-settlement tracking;
@@ -67,5 +68,22 @@ needed for the catalog.
 
 - T+1 dates skip weekends and standard U.S. exchange holidays. Exceptional closures can be added to the account configuration.
 - Legacy DTBP supports time-and-tick peak commitment and aggregate commitment.
-- New intraday margin tracks the lowest margin level after logged exposure-increasing trades.
-- Options, short sales, house margin, opening positions, deposits, assignments, and corporate actions can materially change broker calculations. Reconcile every discrepancy before trading.
+- Once the new regime is selected, PDT trade counting, the $25,000 minimum,
+  four-times DTBP, and legacy DTBP calls are disabled.
+- New intraday margin computes IML after each IML-reducing transaction, preserves
+  the largest negative IML for the day, and estimates long-stock intraday buying
+  power from positive IML and the account's default long house rate.
+- The general $2,000 floor for leveraged margin trading remains. Below it, the
+  displayed capacity is limited to tracked cash.
+- Outstanding deficits include fifth- and fifteenth-business-day checkpoints,
+  the materiality exception for establishing a late-cure practice, and the
+  potential 90-calendar-day credit freeze.
+- Portfolio-margin and good-faith accounts are recognized as excluded from the
+  standard IML computation and therefore require broker-reported intraday buying
+  power.
+- Short-stock maintenance applies the percentage and per-share floors. Leveraged
+  ETP requirements scale with leverage.
+- Options default conservatively to 100% unless an execution override is entered.
+  Strategy offsets, opening-position market moves, deposits, assignments,
+  corporate actions, and proprietary broker controls can still materially change
+  official calculations. Reconcile every discrepancy before trading.

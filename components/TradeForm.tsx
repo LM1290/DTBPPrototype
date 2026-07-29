@@ -2,19 +2,20 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ArrowRight, Plus, ScanSearch } from "lucide-react";
 import { formatMoney } from "../services/engine";
 import { resolveSymbolMargin } from "../data/prototypeMarginCatalog";
-import { AccountSettings, InstrumentType, Side, Trade, TradeAnalysis } from "../types";
+import { AccountSettings, InstrumentType, MarginRegime, Side, Trade, TradeAnalysis } from "../types";
 
 interface Props {
   onAddTrade: (trade: Trade) => void;
   onPreview: (trade: Trade | null) => void;
   previewAnalysis?: TradeAnalysis;
+  previewIntradayBuyingPower?: number;
   settings: AccountSettings;
 }
 
 const localDateTime = () => {
   const now = new Date();
   now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-  return now.toISOString().slice(0, 16);
+  return now.toISOString().slice(0, 19);
 };
 
 const blankTrade = (): Omit<Trade, "id"> => ({
@@ -30,7 +31,13 @@ const blankTrade = (): Omit<Trade, "id"> => ({
   notes: "",
 });
 
-export function TradeForm({ onAddTrade, onPreview, previewAnalysis, settings }: Props) {
+export function TradeForm({
+  onAddTrade,
+  onPreview,
+  previewAnalysis,
+  previewIntradayBuyingPower,
+  settings,
+}: Props) {
   const [trade, setTrade] = useState(blankTrade);
   const [expanded, setExpanded] = useState(false);
   const symbolMargin = resolveSymbolMargin(trade.symbol, settings);
@@ -143,7 +150,11 @@ export function TradeForm({ onAddTrade, onPreview, previewAnalysis, settings }: 
               <ScanSearch size={15} aria-hidden="true" />
               <span>
                 {formatMoney(previewAnalysis?.notional ?? 0)} notional
-                {previewAnalysis ? ` · ${previewAnalysis.message}` : ""}
+                {previewAnalysis && settings.marginRegime === MarginRegime.INTRADAY_MARGIN
+                  ? ` · ${formatMoney(previewIntradayBuyingPower ?? 0)} intraday BP after`
+                  : previewAnalysis
+                    ? ` · ${previewAnalysis.message}`
+                    : ""}
               </span>
             </div>
           )}
@@ -210,6 +221,7 @@ export function TradeForm({ onAddTrade, onPreview, previewAnalysis, settings }: 
               <span>Executed at</span>
               <input
                 type="datetime-local"
+                step="1"
                 value={trade.executedAt}
                 onChange={(event) => set("executedAt", event.target.value)}
               />
